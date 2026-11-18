@@ -9,6 +9,9 @@
 !**/*.go
 **/*_test.go
 
+# Re-include embedded UI static assets
+!internal/ui/static/**
+
 # Re-include Go module files
 !go.mod
 !go.sum
