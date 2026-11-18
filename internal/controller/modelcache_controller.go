@@ -29,7 +29,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -39,6 +38,8 @@ import (
 	"github.com/wutz/modeldock/pkg/harbor"
 	"github.com/wutz/modeldock/pkg/puller"
 )
+
+const casCacheVolumeName = "cas-cache"
 
 // ModelCacheReconciler reconciles a ModelCache object, pre-warming Harbor OCI artifacts into CAS pools.
 type ModelCacheReconciler struct {
@@ -56,19 +57,13 @@ type ModelCacheReconciler struct {
 
 // Reconcile manages CAS warmup Jobs, MountSpec publication, active consumer tracking, and TTL/LRU eviction.
 func (r *ModelCacheReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	log := logf.FromContext(ctx)
 	cfg := r.Config.withDefaults()
 
 	var mc modeldockv1alpha1.ModelCache
 	if err := r.Get(ctx, req.NamespacedName, &mc); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
-
-	if !mc.DeletionTimestamp.IsZero() {
-		return ctrl.Result{}, nil
-	}
-
-	if mc.Status.Phase == modeldockv1alpha1.CachePhaseEvicted {
+	if !mc.DeletionTimestamp.IsZero() || mc.Status.Phase == modeldockv1alpha1.CachePhaseEvicted {
 		return ctrl.Result{}, nil
 	}
 
@@ -80,7 +75,6 @@ func (r *ModelCacheReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		}
 		return ctrl.Result{}, err
 	}
-
 	if mart.Status.Phase != modeldockv1alpha1.ArtifactPhaseReady {
 		return r.markPending(ctx, &mc, "ArtifactNotReady", "Waiting for ModelArtifact to become Ready")
 	}
@@ -97,21 +91,7 @@ func (r *ModelCacheReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 	// Fast path for Kubernetes native OCI ImageVolume.
 	if strategy == modeldockv1alpha1.CacheStrategyImageVolume {
-		now := metav1.Now()
-		mc.Status.Phase = modeldockv1alpha1.CachePhaseReady
-		mc.Status.ResolvedDigest = mart.Spec.OCIDigest
-		mc.Status.MountSpec = &modeldockv1alpha1.CacheMountSpec{
-			Mode:         modeldockv1alpha1.MountModeOCIImageVolume,
-			OCIReference: mart.Status.OCIReference,
-		}
-		if mc.Status.LastUsedTime == nil {
-			mc.Status.LastUsedTime = &now
-		}
-		setCondition(&mc.Status.Conditions, "CacheReady", metav1.ConditionTrue, "ImageVolumeReady", "Native OCI ImageVolume reference ready")
-		if err := r.Status().Update(ctx, &mc); err != nil {
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{}, nil
+		return r.reconcileImageVolume(ctx, &mc, &mart)
 	}
 
 	resolver := cfg.HarborResolver
@@ -125,113 +105,170 @@ func (r *ModelCacheReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 	// If already Ready, track ActiveConsumers and evaluate TTL/LRU eviction.
 	if mc.Status.Phase == modeldockv1alpha1.CachePhaseReady {
-		consumers := r.countActiveConsumers(ctx, &mc, &mart)
-		mc.Status.ActiveConsumers = consumers
-		now := metav1.Now()
-		if consumers > 0 {
-			mc.Status.LastUsedTime = &now
-		} else if mc.Spec.TTLHoursAfterUnused != nil && *mc.Spec.TTLHoursAfterUnused > 0 && mc.Status.LastUsedTime != nil {
-			ttl := time.Duration(*mc.Spec.TTLHoursAfterUnused) * time.Hour
-			if time.Since(mc.Status.LastUsedTime.Time) > ttl {
-				mc.Status.Phase = modeldockv1alpha1.CachePhaseEvicted
-				mc.Status.EvictedAt = &now
-				mc.Status.Message = fmt.Sprintf("Evicted after %dh with 0 active consumers", *mc.Spec.TTLHoursAfterUnused)
-				setCondition(&mc.Status.Conditions, "CacheReady", metav1.ConditionFalse, "EvictedByTTL", mc.Status.Message)
-				if err := r.Status().Update(ctx, &mc); err != nil {
-					return ctrl.Result{}, err
-				}
-				return ctrl.Result{}, nil
-			}
-		}
-		if err := r.Status().Update(ctx, &mc); err != nil {
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
+		return r.reconcileReadyCache(ctx, &mc, &mart)
 	}
 
 	jobName := SanitizeK8sName("mcache", mc.Name)
 	var job batchv1.Job
 	err = r.Get(ctx, types.NamespacedName{Namespace: mc.Namespace, Name: jobName}, &job)
 	if apierrors.IsNotFound(err) {
-		newJob, pvcName, err := r.buildPullerJob(ctx, &mc, &mart, &mrepo, instCfg, cfg, jobName)
-		if err != nil {
-			return r.markFailed(ctx, &mc, "BuildPullerJobFailed", err.Error())
-		}
-		if err := controllerutil.SetControllerReference(&mc, newJob, r.Scheme); err != nil {
-			return ctrl.Result{}, err
-		}
-		if err := r.Create(ctx, newJob); err != nil {
-			return ctrl.Result{}, err
-		}
-		mc.Status.Phase = modeldockv1alpha1.CachePhaseWarmingUp
-		mc.Status.ResolvedDigest = mart.Spec.OCIDigest
-		mc.Status.Message = fmt.Sprintf("Warming up digest %s via %s (pvc=%s)", mart.Spec.OCIDigest, strategy, pvcName)
-		setCondition(&mc.Status.Conditions, "CacheReady", metav1.ConditionFalse, "WarmingUp", mc.Status.Message)
-		if err := r.Status().Update(ctx, &mc); err != nil {
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{RequeueAfter: 3 * time.Second}, nil
+		return r.createPullerJob(ctx, &mc, &mart, &mrepo, instCfg, cfg, strategy, jobName)
 	} else if err != nil {
 		return ctrl.Result{}, err
 	}
 
-	for _, cond := range job.Status.Conditions {
-		if cond.Type == batchv1.JobFailed && cond.Status == corev1.ConditionTrue {
-			return r.markFailed(ctx, &mc, "PullerJobFailed", cond.Message)
-		}
-		if cond.Type == batchv1.JobComplete && cond.Status == corev1.ConditionTrue {
-			dur := int64(0)
-			if job.Status.StartTime != nil && job.Status.CompletionTime != nil {
-				dur = int64(job.Status.CompletionTime.Sub(job.Status.StartTime.Time).Seconds())
-			}
-			pullRes := r.readPullResult(ctx, mc.Namespace, jobName)
-			if pullRes != nil && pullRes.DurationSeconds > 0 {
-				dur = pullRes.DurationSeconds
-			}
+	return r.reconcilePullerJobStatus(ctx, &mc, &mart, &job, strategy, cfg, jobName)
+}
 
-			hexDigest := strings.TrimPrefix(mart.Spec.OCIDigest, "sha256:")
-			var mountSpec modeldockv1alpha1.CacheMountSpec
-			var cachedNodes int32
-			if strategy == modeldockv1alpha1.CacheStrategyNodeLocalNVMe {
-				hostRoot := "/var/lib/modeldock/cas"
-				if mc.Spec.NodeLocalNVMe != nil && mc.Spec.NodeLocalNVMe.HostCacheRoot != "" {
-					hostRoot = strings.TrimRight(mc.Spec.NodeLocalNVMe.HostCacheRoot, "/")
-				}
-				mountSpec = modeldockv1alpha1.CacheMountSpec{
-					Mode:     modeldockv1alpha1.MountModeNodeLocalHostPath,
-					HostPath: fmt.Sprintf("%s/manifests/sha256/%s", hostRoot, hexDigest),
-				}
-				cachedNodes = 1
-			} else {
-				pvcName := r.resolveSharedPVCName(&mc, cfg)
-				mountSpec = modeldockv1alpha1.CacheMountSpec{
-					Mode:      modeldockv1alpha1.MountModeReadOnlyManyPVC,
-					ClaimName: pvcName,
-					SubPath:   "sha256/" + hexDigest,
-				}
-			}
+func (r *ModelCacheReconciler) reconcileImageVolume(
+	ctx context.Context,
+	mc *modeldockv1alpha1.ModelCache,
+	mart *modeldockv1alpha1.ModelArtifact,
+) (ctrl.Result, error) {
+	now := metav1.Now()
+	mc.Status.Phase = modeldockv1alpha1.CachePhaseReady
+	mc.Status.ResolvedDigest = mart.Spec.OCIDigest
+	mc.Status.MountSpec = &modeldockv1alpha1.CacheMountSpec{
+		Mode:         modeldockv1alpha1.MountModeOCIImageVolume,
+		OCIReference: mart.Status.OCIReference,
+	}
+	if mc.Status.LastUsedTime == nil {
+		mc.Status.LastUsedTime = &now
+	}
+	setCondition(&mc.Status.Conditions, "CacheReady", metav1.ConditionTrue, "ImageVolumeReady", "Native OCI ImageVolume reference ready")
+	if err := r.Status().Update(ctx, mc); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{}, nil
+}
 
-			now := metav1.Now()
-			consumers := r.countActiveConsumers(ctx, &mc, &mart)
-			mc.Status.Phase = modeldockv1alpha1.CachePhaseReady
-			mc.Status.ResolvedDigest = mart.Spec.OCIDigest
-			mc.Status.MountSpec = &mountSpec
-			mc.Status.CachedNodesCount = cachedNodes
-			mc.Status.WarmupDurationSeconds = dur
-			mc.Status.ActiveConsumers = consumers
-			mc.Status.LastUsedTime = &now
-			mc.Status.Message = fmt.Sprintf("Cache ready at %s%s", mountSpec.SubPath, mountSpec.HostPath)
-			setCondition(&mc.Status.Conditions, "CacheReady", metav1.ConditionTrue, "WarmupSucceeded", mc.Status.Message)
-
-			if err := r.Status().Update(ctx, &mc); err != nil {
+func (r *ModelCacheReconciler) reconcileReadyCache(
+	ctx context.Context,
+	mc *modeldockv1alpha1.ModelCache,
+	mart *modeldockv1alpha1.ModelArtifact,
+) (ctrl.Result, error) {
+	consumers := r.countActiveConsumers(ctx, mc, mart)
+	mc.Status.ActiveConsumers = consumers
+	now := metav1.Now()
+	if consumers > 0 {
+		mc.Status.LastUsedTime = &now
+	} else if mc.Spec.TTLHoursAfterUnused != nil && *mc.Spec.TTLHoursAfterUnused > 0 && mc.Status.LastUsedTime != nil {
+		ttl := time.Duration(*mc.Spec.TTLHoursAfterUnused) * time.Hour
+		if time.Since(mc.Status.LastUsedTime.Time) > ttl {
+			mc.Status.Phase = modeldockv1alpha1.CachePhaseEvicted
+			mc.Status.EvictedAt = &now
+			mc.Status.Message = fmt.Sprintf("Evicted after %dh with 0 active consumers", *mc.Spec.TTLHoursAfterUnused)
+			setCondition(&mc.Status.Conditions, "CacheReady", metav1.ConditionFalse, "EvictedByTTL", mc.Status.Message)
+			if err := r.Status().Update(ctx, mc); err != nil {
 				return ctrl.Result{}, err
 			}
-			log.Info("ModelCache ready", "cache", mc.Name, "digest", mart.Spec.OCIDigest, "durationSeconds", dur)
-			return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
+			return ctrl.Result{}, nil
 		}
 	}
+	if err := r.Status().Update(ctx, mc); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
+}
 
+func (r *ModelCacheReconciler) createPullerJob(
+	ctx context.Context,
+	mc *modeldockv1alpha1.ModelCache,
+	mart *modeldockv1alpha1.ModelArtifact,
+	mrepo *modeldockv1alpha1.ModelRepository,
+	instCfg *harbor.InstanceConfig,
+	cfg OperatorConfig,
+	strategy modeldockv1alpha1.CacheStrategy,
+	jobName string,
+) (ctrl.Result, error) {
+	newJob, pvcName := r.buildPullerJob(ctx, mc, mart, mrepo, instCfg, cfg, jobName)
+	if err := controllerutil.SetControllerReference(mc, newJob, r.Scheme); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.Create(ctx, newJob); err != nil {
+		return ctrl.Result{}, err
+	}
+	mc.Status.Phase = modeldockv1alpha1.CachePhaseWarmingUp
+	mc.Status.ResolvedDigest = mart.Spec.OCIDigest
+	mc.Status.Message = fmt.Sprintf("Warming up digest %s via %s (pvc=%s)", mart.Spec.OCIDigest, strategy, pvcName)
+	setCondition(&mc.Status.Conditions, "CacheReady", metav1.ConditionFalse, "WarmingUp", mc.Status.Message)
+	if err := r.Status().Update(ctx, mc); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{RequeueAfter: 3 * time.Second}, nil
+}
+
+func (r *ModelCacheReconciler) reconcilePullerJobStatus(
+	ctx context.Context,
+	mc *modeldockv1alpha1.ModelCache,
+	mart *modeldockv1alpha1.ModelArtifact,
+	job *batchv1.Job,
+	strategy modeldockv1alpha1.CacheStrategy,
+	cfg OperatorConfig,
+	jobName string,
+) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+	for _, cond := range job.Status.Conditions {
+		if cond.Type == batchv1.JobFailed && cond.Status == corev1.ConditionTrue {
+			return r.markFailed(ctx, mc, "PullerJobFailed", cond.Message)
+		}
+		if cond.Type != batchv1.JobComplete || cond.Status != corev1.ConditionTrue {
+			continue
+		}
+
+		dur := int64(0)
+		if job.Status.StartTime != nil && job.Status.CompletionTime != nil {
+			dur = int64(job.Status.CompletionTime.Sub(job.Status.StartTime.Time).Seconds())
+		}
+		if pullRes := r.readPullResult(ctx, mc.Namespace, jobName); pullRes != nil && pullRes.DurationSeconds > 0 {
+			dur = pullRes.DurationSeconds
+		}
+
+		mountSpec, cachedNodes := r.buildMountSpec(mc, mart, strategy, cfg)
+		now := metav1.Now()
+		consumers := r.countActiveConsumers(ctx, mc, mart)
+		mc.Status.Phase = modeldockv1alpha1.CachePhaseReady
+		mc.Status.ResolvedDigest = mart.Spec.OCIDigest
+		mc.Status.MountSpec = &mountSpec
+		mc.Status.CachedNodesCount = cachedNodes
+		mc.Status.WarmupDurationSeconds = dur
+		mc.Status.ActiveConsumers = consumers
+		mc.Status.LastUsedTime = &now
+		mc.Status.Message = fmt.Sprintf("Cache ready at %s%s", mountSpec.SubPath, mountSpec.HostPath)
+		setCondition(&mc.Status.Conditions, "CacheReady", metav1.ConditionTrue, "WarmupSucceeded", mc.Status.Message)
+
+		if err := r.Status().Update(ctx, mc); err != nil {
+			return ctrl.Result{}, err
+		}
+		log.Info("ModelCache ready", "cache", mc.Name, "digest", mart.Spec.OCIDigest, "durationSeconds", dur)
+		return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
+	}
 	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+}
+
+func (r *ModelCacheReconciler) buildMountSpec(
+	mc *modeldockv1alpha1.ModelCache,
+	mart *modeldockv1alpha1.ModelArtifact,
+	strategy modeldockv1alpha1.CacheStrategy,
+	cfg OperatorConfig,
+) (modeldockv1alpha1.CacheMountSpec, int32) {
+	hexDigest := strings.TrimPrefix(mart.Spec.OCIDigest, "sha256:")
+	if strategy == modeldockv1alpha1.CacheStrategyNodeLocalNVMe {
+		hostRoot := "/var/lib/modeldock/cas"
+		if mc.Spec.NodeLocalNVMe != nil && mc.Spec.NodeLocalNVMe.HostCacheRoot != "" {
+			hostRoot = strings.TrimRight(mc.Spec.NodeLocalNVMe.HostCacheRoot, "/")
+		}
+		return modeldockv1alpha1.CacheMountSpec{
+			Mode:     modeldockv1alpha1.MountModeNodeLocalHostPath,
+			HostPath: fmt.Sprintf("%s/manifests/sha256/%s", hostRoot, hexDigest),
+		}, 1
+	}
+	pvcName := r.resolveSharedPVCName(mc, cfg)
+	return modeldockv1alpha1.CacheMountSpec{
+		Mode:      modeldockv1alpha1.MountModeReadOnlyManyPVC,
+		ClaimName: pvcName,
+		SubPath:   "sha256/" + hexDigest,
+	}, 0
 }
 
 func (r *ModelCacheReconciler) buildPullerJob(
@@ -242,7 +279,7 @@ func (r *ModelCacheReconciler) buildPullerJob(
 	instCfg *harbor.InstanceConfig,
 	cfg OperatorConfig,
 	jobName string,
-) (*batchv1.Job, string, error) {
+) (*batchv1.Job, string) {
 	projectName, repoName := ResolveHarborProjectAndRepo(ctx, r.Client, mrepo)
 	fullRepo := projectName + "/" + repoName
 	strategy := mc.Spec.Strategy
@@ -287,7 +324,7 @@ func (r *ModelCacheReconciler) buildPullerJob(
 			ReadOnly:  true,
 		},
 		{
-			Name:      "cas-cache",
+			Name:      casCacheVolumeName,
 			MountPath: "/modeldock-cas",
 		},
 	}
@@ -304,7 +341,7 @@ func (r *ModelCacheReconciler) buildPullerJob(
 		}
 		hostPathType := corev1.HostPathDirectoryOrCreate
 		volumes = append(volumes, corev1.Volume{
-			Name: "cas-cache",
+			Name: casCacheVolumeName,
 			VolumeSource: corev1.VolumeSource{
 				HostPath: &corev1.HostPathVolumeSource{
 					Path: hostRoot,
@@ -315,7 +352,7 @@ func (r *ModelCacheReconciler) buildPullerJob(
 	} else {
 		pvcName = r.resolveSharedPVCName(mc, cfg)
 		volumes = append(volumes, corev1.Volume{
-			Name: "cas-cache",
+			Name: casCacheVolumeName,
 			VolumeSource: corev1.VolumeSource{
 				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
 					ClaimName: pvcName,
@@ -334,8 +371,8 @@ func (r *ModelCacheReconciler) buildPullerJob(
 			},
 		},
 		Spec: batchv1.JobSpec{
-			BackoffLimit:            ptr.To(int32(2)),
-			TTLSecondsAfterFinished: ptr.To(int32(3600)),
+			BackoffLimit:            new(int32(2)),
+			TTLSecondsAfterFinished: new(int32(3600)),
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{
@@ -346,7 +383,7 @@ func (r *ModelCacheReconciler) buildPullerJob(
 					RestartPolicy: corev1.RestartPolicyNever,
 					NodeSelector:  nodeSelector,
 					SecurityContext: &corev1.PodSecurityContext{
-						RunAsNonRoot: ptr.To(true),
+						RunAsNonRoot: new(true),
 					},
 					Containers: []corev1.Container{
 						{
@@ -356,9 +393,9 @@ func (r *ModelCacheReconciler) buildPullerJob(
 							Args:            args,
 							VolumeMounts:    mounts,
 							SecurityContext: &corev1.SecurityContext{
-								Privileged:               ptr.To(false),
-								AllowPrivilegeEscalation: ptr.To(false),
-								RunAsNonRoot:             ptr.To(true),
+								Privileged:               new(false),
+								AllowPrivilegeEscalation: new(false),
+								RunAsNonRoot:             new(true),
 								Capabilities: &corev1.Capabilities{
 									Drop: []corev1.Capability{"ALL"},
 								},
@@ -369,7 +406,7 @@ func (r *ModelCacheReconciler) buildPullerJob(
 				},
 			},
 		},
-	}, pvcName, nil
+	}, pvcName
 }
 
 func (r *ModelCacheReconciler) resolveSharedPVCName(mc *modeldockv1alpha1.ModelCache, cfg OperatorConfig) string {

@@ -178,14 +178,25 @@ func (c *RegistryClient) PushBlobBytes(ctx context.Context, repository, digest s
 
 // PushBlobStream performs a zero-copy chunked OCI blob upload (POST -> PATCH chunks -> PUT ?digest=...)
 // directly from r without buffering the entire payload in memory or temp disk.
-func (c *RegistryClient) PushBlobStream(ctx context.Context, repository string, digest string, totalSize int64, r io.Reader) error {
+func (c *RegistryClient) PushBlobStream(
+	ctx context.Context,
+	repository, digest string,
+	totalSize int64,
+	r io.Reader,
+) error {
 	_, err := c.PushBlobStreamDynamic(ctx, repository, totalSize, r, digest)
 	return err
 }
 
 // PushBlobStreamDynamic streams r in chunks via PATCH while computing SHA256 on the fly.
 // If expectedDigest is non-empty it verifies the computed digest matches before committing PUT ?digest=...
-func (c *RegistryClient) PushBlobStreamDynamic(ctx context.Context, repository string, totalSize int64, r io.Reader, expectedDigest string) (string, error) {
+func (c *RegistryClient) PushBlobStreamDynamic(
+	ctx context.Context,
+	repository string,
+	totalSize int64,
+	r io.Reader,
+	expectedDigest string,
+) (string, error) {
 	repo := strings.Trim(repository, "/")
 	scope := fmt.Sprintf("repository:%s:pull,push", repo)
 
@@ -203,7 +214,10 @@ func (c *RegistryClient) PushBlobStreamDynamic(ctx context.Context, repository s
 	_ = initResp.Body.Close()
 
 	if initResp.StatusCode != http.StatusAccepted && initResp.StatusCode != http.StatusCreated {
-		return "", fmt.Errorf("initiate blob upload returned %d: %s", initResp.StatusCode, strings.TrimSpace(string(initBody)))
+		return "", fmt.Errorf(
+			"initiate blob upload returned %d: %s",
+			initResp.StatusCode, strings.TrimSpace(string(initBody)),
+		)
 	}
 	if initResp.StatusCode == http.StatusCreated {
 		return expectedDigest, nil
@@ -240,7 +254,10 @@ func (c *RegistryClient) PushBlobStreamDynamic(ctx context.Context, repository s
 			_ = patchResp.Body.Close()
 
 			if patchResp.StatusCode != http.StatusAccepted && patchResp.StatusCode != http.StatusNoContent {
-				return "", fmt.Errorf("patch blob chunk returned %d: %s", patchResp.StatusCode, strings.TrimSpace(string(patchBody)))
+				return "", fmt.Errorf(
+					"patch blob chunk returned %d: %s",
+					patchResp.StatusCode, strings.TrimSpace(string(patchBody)),
+				)
 			}
 			if nextLoc := patchResp.Header.Get("Location"); nextLoc != "" {
 				uploadLoc = resolveLocation(c.baseURL, nextLoc)
@@ -280,13 +297,20 @@ func (c *RegistryClient) PushBlobStreamDynamic(ctx context.Context, repository s
 	commitBody, _ := io.ReadAll(io.LimitReader(commitResp.Body, 4096))
 	_ = commitResp.Body.Close()
 	if commitResp.StatusCode != http.StatusCreated && commitResp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("commit blob upload returned %d: %s", commitResp.StatusCode, strings.TrimSpace(string(commitBody)))
+		return "", fmt.Errorf(
+			"commit blob upload returned %d: %s",
+			commitResp.StatusCode, strings.TrimSpace(string(commitBody)),
+		)
 	}
 	return digest, nil
 }
 
 // PutManifest pushes an OCI manifest at reference (tag or digest) and returns its canonical sha256 digest.
-func (c *RegistryClient) PutManifest(ctx context.Context, repository, reference string, manifest *Manifest) (string, int64, error) {
+func (c *RegistryClient) PutManifest(
+	ctx context.Context,
+	repository, reference string,
+	manifest *Manifest,
+) (string, int64, error) {
 	if manifest.SchemaVersion == 0 {
 		manifest.SchemaVersion = 2
 	}
@@ -349,7 +373,10 @@ func (c *RegistryClient) GetManifest(ctx context.Context, repository, reference 
 		return nil, "", err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, "", fmt.Errorf("GET manifest %s returned %d: %s", reference, resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, "", fmt.Errorf(
+			"GET manifest %s returned %d: %s",
+			reference, resp.StatusCode, strings.TrimSpace(string(body)),
+		)
 	}
 
 	var m Manifest
@@ -375,7 +402,12 @@ func (c *RegistryClient) GetBlobBytes(ctx context.Context, repository, digest st
 
 // PullBlob downloads a blob, following HTTP 307/302 S3 redirects safely (without forwarding Harbor credentials to S3),
 // optionally routing through Dragonfly P2P HTTP proxy, and verifying the full sha256 digest.
-func (c *RegistryClient) PullBlob(ctx context.Context, repository, digest string, dst io.Writer, rangeStart int64) error {
+func (c *RegistryClient) PullBlob(
+	ctx context.Context,
+	repository, digest string,
+	dst io.Writer,
+	rangeStart int64,
+) error {
 	repo := strings.Trim(repository, "/")
 	u := fmt.Sprintf("%s/v2/%s/blobs/%s", c.baseURL, repo, digest)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
@@ -391,9 +423,10 @@ func (c *RegistryClient) PullBlob(ctx context.Context, repository, digest string
 		return err
 	}
 
-	// Follow up to 3 cross-origin redirects (e.g. Harbor HTTP 307 -> S3 presigned URL) WITHOUT Harbor Authorization header.
+	// Follow up to 3 cross-origin redirects (e.g. Harbor HTTP 307 -> S3 presigned URL)
+	// WITHOUT forwarding the Harbor Authorization header.
 	redirects := 0
-	for (resp.StatusCode == http.StatusTemporaryRedirect || resp.StatusCode == http.StatusFound || resp.StatusCode == http.StatusMovedPermanently || resp.StatusCode == http.StatusSeeOther) && redirects < 3 {
+	for isRedirectStatus(resp.StatusCode) && redirects < 3 {
 		loc := resp.Header.Get("Location")
 		_ = resp.Body.Close()
 		if loc == "" {
@@ -436,8 +469,19 @@ func (c *RegistryClient) PullBlob(ctx context.Context, repository, digest string
 	return nil
 }
 
+func isRedirectStatus(code int) bool {
+	return code == http.StatusTemporaryRedirect ||
+		code == http.StatusFound ||
+		code == http.StatusMovedPermanently ||
+		code == http.StatusSeeOther
+}
+
 // GetModelPackConfig fetches and decodes the ModelPackConfig referenced by a manifest.
-func (c *RegistryClient) GetModelPackConfig(ctx context.Context, repository string, manifest *Manifest) (*ModelPackConfig, error) {
+func (c *RegistryClient) GetModelPackConfig(
+	ctx context.Context,
+	repository string,
+	manifest *Manifest,
+) (*ModelPackConfig, error) {
 	if manifest == nil || manifest.Config.Digest == "" {
 		return nil, errors.New("manifest has no config digest")
 	}
@@ -452,7 +496,12 @@ func (c *RegistryClient) GetModelPackConfig(ctx context.Context, repository stri
 	return &cfg, nil
 }
 
-func (c *RegistryClient) doAuthenticated(ctx context.Context, client *http.Client, req *http.Request, scope string) (*http.Response, error) {
+func (c *RegistryClient) doAuthenticated(
+	ctx context.Context,
+	client *http.Client,
+	req *http.Request,
+	scope string,
+) (*http.Response, error) {
 	if tok := c.getCachedToken(scope); tok != "" {
 		req.Header.Set("Authorization", "Bearer "+tok)
 	} else if c.username != "" {

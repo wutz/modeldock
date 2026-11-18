@@ -91,8 +91,8 @@ func ResolveHarborProjectAndRepo(ctx context.Context, c client.Reader, mrepo *mo
 // BuildDockerConfigJSON encodes registry credentials into a Kubernetes dockerconfigjson payload.
 func BuildDockerConfigJSON(registryHost, username, password string) ([]byte, error) {
 	auth := base64.StdEncoding.EncodeToString([]byte(username + ":" + password))
-	payload := map[string]interface{}{
-		"auths": map[string]interface{}{
+	payload := map[string]any{
+		"auths": map[string]any{
 			registryHost: map[string]string{
 				"username": username,
 				"password": password,

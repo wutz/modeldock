@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"slices"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -59,7 +60,6 @@ func (r *ModelArtifactReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if err := r.Get(ctx, req.NamespacedName, &mart); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
-
 	if !mart.DeletionTimestamp.IsZero() {
 		return ctrl.Result{}, nil
 	}
@@ -79,7 +79,6 @@ func (r *ModelArtifactReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		}
 		return ctrl.Result{}, err
 	}
-
 	if mrepo.Status.Phase != modeldockv1alpha1.RepositoryPhaseReady {
 		mart.Status.Phase = modeldockv1alpha1.ArtifactPhaseSyncing
 		setCondition(&mart.Status.Conditions, "ManifestVerified", metav1.ConditionFalse, "RepositoryNotReady", "Waiting for ModelRepository to become Ready")
@@ -87,41 +86,11 @@ func (r *ModelArtifactReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
 
-	resolver := cfg.HarborResolver
-	if resolver == nil {
-		resolver = &harbor.Resolver{Client: r.Client, SystemNamespace: cfg.SystemNamespace}
+	instCfg, regClient, projectName, repoName, errRes := r.newPullRegistryClient(ctx, &mart, &mrepo, cfg)
+	if errRes != nil {
+		return *errRes, nil
 	}
-	instCfg, err := resolver.Resolve(ctx, mrepo.Spec.Harbor.InstanceRef)
-	if err != nil {
-		return r.markInvalid(ctx, &mart, "HarborConfigError", err.Error())
-	}
-
-	// Read pull robot credentials from the repository's pull Secret.
-	pullUser, pullPass := instCfg.Username, instCfg.Password
-	if mrepo.Status.PullSecretName != "" {
-		var pullSec corev1.Secret
-		if err := r.Get(ctx, types.NamespacedName{Namespace: mart.Namespace, Name: mrepo.Status.PullSecretName}, &pullSec); err == nil {
-			if u := string(pullSec.Data["username"]); u != "" {
-				pullUser = u
-			}
-			if p := string(pullSec.Data["password"]); p != "" {
-				pullPass = p
-			}
-		}
-	}
-
-	projectName, repoName := ResolveHarborProjectAndRepo(ctx, r.Client, &mrepo)
 	fullRepo := projectName + "/" + repoName
-
-	regClient, err := oci.NewRegistryClient(oci.ClientOptions{
-		RegistryURL:     instCfg.Endpoint,
-		Username:        pullUser,
-		Password:        pullPass,
-		InsecureSkipTLS: instCfg.InsecureSkipTLS,
-	})
-	if err != nil {
-		return r.markInvalid(ctx, &mart, "RegistryClientError", err.Error())
-	}
 
 	manifest, resolvedDigest, err := regClient.GetManifest(ctx, fullRepo, mart.Spec.OCIDigest)
 	if err != nil {
@@ -133,93 +102,22 @@ func (r *ModelArtifactReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			fmt.Sprintf("Harbor returned digest %s, expected %s", resolvedDigest, mart.Spec.OCIDigest))
 	}
 
-	var totalSize int64
-	var shardCount int32
-	for _, l := range manifest.Layers {
-		totalSize += l.Size
-		if l.MediaType == oci.MediaTypeWeightRaw {
-			shardCount++
-		}
+	totalSize, shardCount := summarizeManifestLayers(manifest)
+
+	unsafeSer, cfgShardCount, requeued, err := r.hydrateFromModelPackConfig(ctx, &mart, regClient, fullRepo, manifest)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if requeued {
+		return ctrl.Result{RequeueAfter: time.Millisecond}, nil
+	}
+	if cfgShardCount > 0 {
+		shardCount = cfgShardCount
 	}
 
-	mpCfg, cfgErr := regClient.GetModelPackConfig(ctx, fullRepo, manifest)
-	unsafeSer := false
-	if cfgErr == nil && mpCfg != nil {
-		unsafeSer = mpCfg.UnsafeSerialization
-		if mpCfg.ShardCount > 0 {
-			shardCount = mpCfg.ShardCount
-		}
-		// Hydrate Spec metadata if created externally (e.g. via Harbor cross-cluster replication webhook).
-		specUpdated := false
-		if mart.Spec.ServingProfile == nil && mpCfg.ServingProfile != nil {
-			mart.Spec.ServingProfile = mpCfg.ServingProfile
-			specUpdated = true
-		}
-		if mart.Spec.LoRASpec == nil && mpCfg.LoRASpec != nil {
-			mart.Spec.LoRASpec = mpCfg.LoRASpec
-			specUpdated = true
-		}
-		if mart.Spec.Lineage == nil && mpCfg.Lineage != nil {
-			mart.Spec.Lineage = mpCfg.Lineage
-			specUpdated = true
-		}
-		if specUpdated {
-			if err := r.Update(ctx, &mart); err != nil {
-				return ctrl.Result{}, err
-			}
-			return ctrl.Result{RequeueAfter: time.Millisecond}, nil
-		}
-	}
-
-	// Verify BaseModelRef compatibility if LoRAAdapter or DraftModel.
-	if mart.Spec.ArtifactType == modeldockv1alpha1.ArtifactTypeLoRAAdapter || mart.Spec.ArtifactType == modeldockv1alpha1.ArtifactTypeDraftModel {
-		if err := r.verifyBaseModel(ctx, &mart); err != nil {
-			setCondition(&mart.Status.Conditions, "BaseModelCompatible", metav1.ConditionFalse, "BaseModelIncompatible", err.Error())
-		} else {
-			setCondition(&mart.Status.Conditions, "BaseModelCompatible", metav1.ConditionTrue, "VerifiedAgainstBase", "BaseModelRef resolved and Ready")
-		}
-	}
-
-	// Sync Harbor stage tags (stage-verified / stage-production) for cross-cluster Harbor Replication filtering.
-	if hc, err := instCfg.NewHarborClient(); err == nil {
-		switch mart.Spec.Stage {
-		case modeldockv1alpha1.StageVerified:
-			_ = hc.AddArtifactTag(ctx, projectName, repoName, mart.Spec.OCIDigest, "stage-verified")
-			_ = hc.DeleteArtifactTag(ctx, projectName, repoName, mart.Spec.OCIDigest, "stage-production")
-		case modeldockv1alpha1.StageProduction:
-			_ = hc.AddArtifactTag(ctx, projectName, repoName, mart.Spec.OCIDigest, "stage-production")
-		case modeldockv1alpha1.StageDeprecated, modeldockv1alpha1.StageArchived:
-			_ = hc.DeleteArtifactTag(ctx, projectName, repoName, mart.Spec.OCIDigest, "stage-production")
-			_ = hc.DeleteArtifactTag(ctx, projectName, repoName, mart.Spec.OCIDigest, "stage-verified")
-		}
-	}
-
-	// Handle warmup trigger (autoWarmupStages or manual annotation).
-	warmupAnnotated := mart.Annotations[modeldockv1alpha1.AnnotationAction] == modeldockv1alpha1.ActionWarmup
-	shouldWarmup := warmupAnnotated || stageInList(mart.Spec.Stage, mrepo.Spec.AutoWarmupStages)
-	var activeCacheName string
-	if shouldWarmup && mart.Spec.Stage != modeldockv1alpha1.StageArchived {
-		mc, err := r.ensureModelCache(ctx, &mart)
-		if err != nil {
-			log.Error(err, "failed to ensure ModelCache")
-		} else if mc != nil {
-			if mc.Status.Phase == modeldockv1alpha1.CachePhaseReady {
-				activeCacheName = mc.Name
-			}
-			if warmupAnnotated {
-				delete(mart.Annotations, modeldockv1alpha1.AnnotationAction)
-				_ = r.Update(ctx, &mart)
-			}
-		}
-	} else {
-		// Check if an existing ModelCache exists for this artifact.
-		var mc modeldockv1alpha1.ModelCache
-		if err := r.Get(ctx, types.NamespacedName{Namespace: mart.Namespace, Name: cacheNameForArtifact(&mart)}, &mc); err == nil {
-			if mc.Status.Phase == modeldockv1alpha1.CachePhaseReady {
-				activeCacheName = mc.Name
-			}
-		}
-	}
+	r.reconcileBaseModelCondition(ctx, &mart)
+	r.syncHarborStageTags(ctx, instCfg, projectName, repoName, &mart)
+	activeCacheName := r.reconcileArtifactWarmup(ctx, &mart, &mrepo)
 
 	if mart.Spec.Stage == modeldockv1alpha1.StageArchived {
 		mart.Status.Phase = modeldockv1alpha1.ArtifactPhaseArchived
@@ -242,6 +140,168 @@ func (r *ModelArtifactReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, nil
+}
+
+func (r *ModelArtifactReconciler) newPullRegistryClient(
+	ctx context.Context,
+	mart *modeldockv1alpha1.ModelArtifact,
+	mrepo *modeldockv1alpha1.ModelRepository,
+	cfg OperatorConfig,
+) (*harbor.InstanceConfig, *oci.RegistryClient, string, string, *ctrl.Result) {
+	resolver := cfg.HarborResolver
+	if resolver == nil {
+		resolver = &harbor.Resolver{Client: r.Client, SystemNamespace: cfg.SystemNamespace}
+	}
+	instCfg, err := resolver.Resolve(ctx, mrepo.Spec.Harbor.InstanceRef)
+	if err != nil {
+		res, _ := r.markInvalid(ctx, mart, "HarborConfigError", err.Error())
+		return nil, nil, "", "", &res
+	}
+
+	pullUser, pullPass := instCfg.Username, instCfg.Password
+	if mrepo.Status.PullSecretName != "" {
+		var pullSec corev1.Secret
+		if err := r.Get(ctx, types.NamespacedName{Namespace: mart.Namespace, Name: mrepo.Status.PullSecretName}, &pullSec); err == nil {
+			if u := string(pullSec.Data["username"]); u != "" {
+				pullUser = u
+			}
+			if p := string(pullSec.Data["password"]); p != "" {
+				pullPass = p
+			}
+		}
+	}
+
+	projectName, repoName := ResolveHarborProjectAndRepo(ctx, r.Client, mrepo)
+	regClient, err := oci.NewRegistryClient(oci.ClientOptions{
+		RegistryURL:     instCfg.Endpoint,
+		Username:        pullUser,
+		Password:        pullPass,
+		InsecureSkipTLS: instCfg.InsecureSkipTLS,
+	})
+	if err != nil {
+		res, _ := r.markInvalid(ctx, mart, "RegistryClientError", err.Error())
+		return nil, nil, "", "", &res
+	}
+	return instCfg, regClient, projectName, repoName, nil
+}
+
+func summarizeManifestLayers(manifest *oci.Manifest) (int64, int32) {
+	var totalSize int64
+	var shardCount int32
+	for _, l := range manifest.Layers {
+		totalSize += l.Size
+		if l.MediaType == oci.MediaTypeWeightRaw {
+			shardCount++
+		}
+	}
+	return totalSize, shardCount
+}
+
+func (r *ModelArtifactReconciler) hydrateFromModelPackConfig(
+	ctx context.Context,
+	mart *modeldockv1alpha1.ModelArtifact,
+	regClient *oci.RegistryClient,
+	fullRepo string,
+	manifest *oci.Manifest,
+) (unsafeSer bool, shardCount int32, requeued bool, err error) {
+	mpCfg, cfgErr := regClient.GetModelPackConfig(ctx, fullRepo, manifest)
+	if cfgErr != nil || mpCfg == nil {
+		return false, 0, false, nil
+	}
+	unsafeSer = mpCfg.UnsafeSerialization
+	shardCount = mpCfg.ShardCount
+
+	// Hydrate Spec metadata if created externally (e.g. via Harbor cross-cluster replication webhook).
+	specUpdated := false
+	if mart.Spec.ServingProfile == nil && mpCfg.ServingProfile != nil {
+		mart.Spec.ServingProfile = mpCfg.ServingProfile
+		specUpdated = true
+	}
+	if mart.Spec.LoRASpec == nil && mpCfg.LoRASpec != nil {
+		mart.Spec.LoRASpec = mpCfg.LoRASpec
+		specUpdated = true
+	}
+	if mart.Spec.Lineage == nil && mpCfg.Lineage != nil {
+		mart.Spec.Lineage = mpCfg.Lineage
+		specUpdated = true
+	}
+	if specUpdated {
+		if err := r.Update(ctx, mart); err != nil {
+			return false, 0, false, err
+		}
+		return unsafeSer, shardCount, true, nil
+	}
+	return unsafeSer, shardCount, false, nil
+}
+
+func (r *ModelArtifactReconciler) reconcileBaseModelCondition(ctx context.Context, mart *modeldockv1alpha1.ModelArtifact) {
+	if mart.Spec.ArtifactType != modeldockv1alpha1.ArtifactTypeLoRAAdapter &&
+		mart.Spec.ArtifactType != modeldockv1alpha1.ArtifactTypeDraftModel {
+		return
+	}
+	if err := r.verifyBaseModel(ctx, mart); err != nil {
+		setCondition(&mart.Status.Conditions, "BaseModelCompatible", metav1.ConditionFalse, "BaseModelIncompatible", err.Error())
+		return
+	}
+	setCondition(&mart.Status.Conditions, "BaseModelCompatible", metav1.ConditionTrue, "VerifiedAgainstBase", "BaseModelRef resolved and Ready")
+}
+
+func (r *ModelArtifactReconciler) syncHarborStageTags(
+	ctx context.Context,
+	instCfg *harbor.InstanceConfig,
+	projectName, repoName string,
+	mart *modeldockv1alpha1.ModelArtifact,
+) {
+	hc, err := instCfg.NewHarborClient()
+	if err != nil {
+		return
+	}
+	switch mart.Spec.Stage {
+	case modeldockv1alpha1.StageVerified:
+		_ = hc.AddArtifactTag(ctx, projectName, repoName, mart.Spec.OCIDigest, "stage-verified")
+		_ = hc.DeleteArtifactTag(ctx, projectName, repoName, mart.Spec.OCIDigest, "stage-production")
+	case modeldockv1alpha1.StageProduction:
+		_ = hc.AddArtifactTag(ctx, projectName, repoName, mart.Spec.OCIDigest, "stage-production")
+	case modeldockv1alpha1.StageDeprecated, modeldockv1alpha1.StageArchived:
+		_ = hc.DeleteArtifactTag(ctx, projectName, repoName, mart.Spec.OCIDigest, "stage-production")
+		_ = hc.DeleteArtifactTag(ctx, projectName, repoName, mart.Spec.OCIDigest, "stage-verified")
+	}
+}
+
+func (r *ModelArtifactReconciler) reconcileArtifactWarmup(
+	ctx context.Context,
+	mart *modeldockv1alpha1.ModelArtifact,
+	mrepo *modeldockv1alpha1.ModelRepository,
+) string {
+	log := logf.FromContext(ctx)
+	warmupAnnotated := mart.Annotations[modeldockv1alpha1.AnnotationAction] == modeldockv1alpha1.ActionWarmup
+	shouldWarmup := warmupAnnotated || slices.Contains(mrepo.Spec.AutoWarmupStages, mart.Spec.Stage)
+	if shouldWarmup && mart.Spec.Stage != modeldockv1alpha1.StageArchived {
+		mc, err := r.ensureModelCache(ctx, mart)
+		if err != nil {
+			log.Error(err, "failed to ensure ModelCache")
+			return ""
+		}
+		var activeCacheName string
+		if mc != nil {
+			if mc.Status.Phase == modeldockv1alpha1.CachePhaseReady {
+				activeCacheName = mc.Name
+			}
+			if warmupAnnotated {
+				delete(mart.Annotations, modeldockv1alpha1.AnnotationAction)
+				_ = r.Update(ctx, mart)
+			}
+		}
+		return activeCacheName
+	}
+
+	var mc modeldockv1alpha1.ModelCache
+	if err := r.Get(ctx, types.NamespacedName{Namespace: mart.Namespace, Name: cacheNameForArtifact(mart)}, &mc); err == nil {
+		if mc.Status.Phase == modeldockv1alpha1.CachePhaseReady {
+			return mc.Name
+		}
+	}
+	return ""
 }
 
 func (r *ModelArtifactReconciler) verifyBaseModel(ctx context.Context, mart *modeldockv1alpha1.ModelArtifact) error {
@@ -294,15 +354,6 @@ func (r *ModelArtifactReconciler) markInvalid(ctx context.Context, mart *modeldo
 	setCondition(&mart.Status.Conditions, "ManifestVerified", metav1.ConditionFalse, reason, msg)
 	_ = r.Status().Update(ctx, mart)
 	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
-}
-
-func stageInList(s modeldockv1alpha1.ArtifactStage, list []modeldockv1alpha1.ArtifactStage) bool {
-	for _, item := range list {
-		if item == s {
-			return true
-		}
-	}
-	return false
 }
 
 // SetupWithManager sets up the controller with the Manager.

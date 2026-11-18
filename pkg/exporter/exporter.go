@@ -19,6 +19,7 @@ package exporter
 import (
 	"archive/tar"
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -26,7 +27,7 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -121,7 +122,10 @@ func ExportFromDir(ctx context.Context, opts DirExportOptions) (*ExportResult, e
 		if exists {
 			skippedCount.Add(1)
 		} else {
-			if err := opts.RegistryClient.PushBlobStream(ctx, opts.Repository, cfgLayerDigest, int64(len(tarBytes)), bytes.NewReader(tarBytes)); err != nil {
+			err := opts.RegistryClient.PushBlobStream(
+				ctx, opts.Repository, cfgLayerDigest, int64(len(tarBytes)), bytes.NewReader(tarBytes),
+			)
+			if err != nil {
 				return nil, fmt.Errorf("push config layer blob: %w", err)
 			}
 			bytesTransferred.Add(int64(len(tarBytes)))
@@ -248,7 +252,9 @@ func ExportFromDir(ctx context.Context, opts DirExportOptions) (*ExportResult, e
 
 	layers = append(layers, weightDescs...)
 
-	return finalizeManifest(ctx, opts.CommonOptions, layers, inspectRes, &bytesTransferred, &skippedCount, &uploadedCount, "")
+	return finalizeManifest(
+		ctx, opts.CommonOptions, layers, inspectRes, &bytesTransferred, &skippedCount, &uploadedCount, "",
+	)
 }
 
 func finalizeManifest(
@@ -303,7 +309,10 @@ func finalizeManifest(
 	if exists {
 		skippedCount.Add(1)
 	} else {
-		if err := opts.RegistryClient.PushBlobStream(ctx, opts.Repository, cfgDigest, int64(len(cfgBytes)), bytes.NewReader(cfgBytes)); err != nil {
+		err := opts.RegistryClient.PushBlobStream(
+			ctx, opts.Repository, cfgDigest, int64(len(cfgBytes)), bytes.NewReader(cfgBytes),
+		)
+		if err != nil {
 			return nil, fmt.Errorf("push ModelPackConfig blob: %w", err)
 		}
 		bytesTransferred.Add(int64(len(cfgBytes)))
@@ -363,7 +372,9 @@ func finalizeManifest(
 
 func packConfigFilesTarZstd(files []modelmeta.ConfigFile) ([]byte, []string, error) {
 	sorted := append([]modelmeta.ConfigFile(nil), files...)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].RelPath < sorted[j].RelPath })
+	slices.SortFunc(sorted, func(a, b modelmeta.ConfigFile) int {
+		return cmp.Compare(a.RelPath, b.RelPath)
+	})
 
 	var out bytes.Buffer
 	zw, err := zstd.NewWriter(&out)
@@ -411,7 +422,7 @@ func packInMemoryConfigFilesTarZstd(files map[string][]byte) ([]byte, []string, 
 	for k := range files {
 		names = append(names, k)
 	}
-	sort.Strings(names)
+	slices.Sort(names)
 
 	var out bytes.Buffer
 	zw, err := zstd.NewWriter(&out)

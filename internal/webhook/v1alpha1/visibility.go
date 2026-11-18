@@ -19,6 +19,7 @@ package v1alpha1
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -67,10 +68,8 @@ func ValidateCrossNamespaceModelReference(
 	case modeldockv1alpha1.VisibilityPublic:
 		return nil
 	case modeldockv1alpha1.VisibilityWorkspaceShared:
-		for _, allowed := range targetRepo.Spec.SharedNamespaces {
-			if allowed == callerNS {
-				return nil
-			}
+		if slices.Contains(targetRepo.Spec.SharedNamespaces, callerNS) {
+			return nil
 		}
 		return fmt.Errorf("namespace %q is not in sharedNamespaces whitelist of repository %s/%s", callerNS, targetNS, targetRepo.Name)
 	default:

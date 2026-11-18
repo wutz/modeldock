@@ -208,7 +208,7 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		if len(parts) == 3 && parts[0] == "repository" {
 			repo := parts[1]
 			actions := strings.Split(parts[2], ",")
-			proj := strings.Split(repo, "/")[0]
+			proj, _, _ := strings.Cut(repo, "/")
 			if !robotAllows(rb, proj, actions) {
 				http.Error(w, "forbidden scope for robot", http.StatusForbidden)
 				return
@@ -217,7 +217,7 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 	}
 	payload := fmt.Sprintf("%s|%s", user, scope)
 	tok := base64.StdEncoding.EncodeToString([]byte(payload))
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"token":      tok,
 		"expires_in": 900,
 	})
@@ -247,8 +247,8 @@ func robotAllows(rb *robotEntry, project string, actions []string) bool {
 
 func (s *Server) authorizeOCI(w http.ResponseWriter, r *http.Request, repo, action string) bool {
 	auth := r.Header.Get("Authorization")
-	if strings.HasPrefix(auth, "Bearer ") {
-		raw, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(auth, "Bearer "))
+	if bearerTok, ok := strings.CutPrefix(auth, "Bearer "); ok {
+		raw, err := base64.StdEncoding.DecodeString(bearerTok)
 		if err == nil {
 			parts := strings.SplitN(string(raw), "|", 2)
 			if len(parts) == 2 {
@@ -266,7 +266,7 @@ func (s *Server) authorizeOCI(w http.ResponseWriter, r *http.Request, repo, acti
 				}
 				s.mu.RUnlock()
 				if matched != nil {
-					proj := strings.Split(repo, "/")[0]
+					proj, _, _ := strings.Cut(repo, "/")
 					if robotAllows(matched, proj, []string{action}) {
 						return true
 					}
@@ -280,7 +280,7 @@ func (s *Server) authorizeOCI(w http.ResponseWriter, r *http.Request, repo, acti
 		if rb == nil {
 			return true
 		}
-		proj := strings.Split(repo, "/")[0]
+		proj, _, _ := strings.Cut(repo, "/")
 		if robotAllows(rb, proj, []string{action}) {
 			return true
 		}
@@ -290,10 +290,13 @@ func (s *Server) authorizeOCI(w http.ResponseWriter, r *http.Request, repo, acti
 	if repo != "" {
 		scope = fmt.Sprintf(`,scope="repository:%s:%s"`, repo, action)
 	}
-	w.Header().Set("Www-Authenticate", fmt.Sprintf(`Bearer realm="%s/service/token",service="harbor-registry"%s`, s.URL(), scope))
+	w.Header().Set("Www-Authenticate",
+		fmt.Sprintf(`Bearer realm="%s/service/token",service="harbor-registry"%s`, s.URL(), scope))
 	http.Error(w, "unauthorized", http.StatusUnauthorized)
 	return false
 }
+
+const robotsAPIPath = "/robots"
 
 func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 	if user, _, ok := s.authenticateBasic(r); !ok || user != s.AdminUser {
@@ -303,7 +306,22 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 	p := strings.TrimPrefix(r.URL.Path, "/api/v2.0")
 
 	switch {
-	case p == "/projects" && r.Method == http.MethodGet:
+	case p == "/projects":
+		s.handleProjectsAPI(w, r)
+	case p == "/quotas" || strings.HasPrefix(p, "/quotas/"):
+		s.handleQuotasAPI(w, r, p)
+	case p == robotsAPIPath || strings.HasPrefix(p, "/robots/"):
+		s.handleRobotsAPI(w, r, p)
+	case strings.HasPrefix(p, "/projects/"):
+		s.handleProjectArtifactsAPI(w, r, p)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func (s *Server) handleProjectsAPI(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
 		nameFilter := r.URL.Query().Get("name")
 		s.mu.RLock()
 		var out []harbor.Project
@@ -314,8 +332,7 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		}
 		s.mu.RUnlock()
 		writeJSON(w, http.StatusOK, out)
-
-	case p == "/projects" && r.Method == http.MethodPost:
+	case http.MethodPost:
 		var req struct {
 			ProjectName  string            `json:"project_name"`
 			Public       bool              `json:"public"`
@@ -350,14 +367,20 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		}
 		s.mu.Unlock()
 		w.WriteHeader(http.StatusCreated)
+	default:
+		http.NotFound(w, r)
+	}
+}
 
+func (s *Server) handleQuotasAPI(w http.ResponseWriter, r *http.Request, p string) {
+	switch {
 	case p == "/quotas" && r.Method == http.MethodGet:
 		refID, _ := strconv.ParseInt(r.URL.Query().Get("reference_id"), 10, 64)
 		s.mu.RLock()
-		var out []map[string]interface{}
+		var out []map[string]any
 		for _, q := range s.quotas {
 			if refID == 0 || q.ProjectID == refID {
-				out = append(out, map[string]interface{}{
+				out = append(out, map[string]any{
 					"id":           q.ID,
 					"reference_id": q.ProjectID,
 					"hard":         map[string]int64{"storage": q.StorageLimit},
@@ -366,7 +389,6 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		}
 		s.mu.RUnlock()
 		writeJSON(w, http.StatusOK, out)
-
 	case strings.HasPrefix(p, "/quotas/") && r.Method == http.MethodPut:
 		id, _ := strconv.ParseInt(strings.TrimPrefix(p, "/quotas/"), 10, 64)
 		var req struct {
@@ -384,8 +406,14 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		}
 		s.mu.Unlock()
 		w.WriteHeader(http.StatusOK)
+	default:
+		http.NotFound(w, r)
+	}
+}
 
-	case p == "/robots" && r.Method == http.MethodGet:
+func (s *Server) handleRobotsAPI(w http.ResponseWriter, r *http.Request, p string) {
+	switch {
+	case p == robotsAPIPath && r.Method == http.MethodGet:
 		s.mu.RLock()
 		out := make([]harbor.Robot, 0, len(s.robots))
 		for _, rb := range s.robots {
@@ -395,8 +423,7 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		}
 		s.mu.RUnlock()
 		writeJSON(w, http.StatusOK, out)
-
-	case p == "/robots" && r.Method == http.MethodPost:
+	case p == robotsAPIPath && r.Method == http.MethodPost:
 		var req harbor.RobotRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -425,17 +452,12 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.robots[rid] = entry
 		s.mu.Unlock()
 		writeJSON(w, http.StatusCreated, entry.Robot)
-
 	case strings.HasPrefix(p, "/robots/") && r.Method == http.MethodDelete:
 		id, _ := strconv.ParseInt(strings.TrimPrefix(p, "/robots/"), 10, 64)
 		s.mu.Lock()
 		delete(s.robots, id)
 		s.mu.Unlock()
 		w.WriteHeader(http.StatusOK)
-
-	case strings.HasPrefix(p, "/projects/"):
-		s.handleProjectArtifactsAPI(w, r, p)
-
 	default:
 		http.NotFound(w, r)
 	}
@@ -560,26 +582,21 @@ func (s *Server) handleOCI(w http.ResponseWriter, r *http.Request) {
 
 	rest := strings.TrimPrefix(r.URL.Path, "/v2/")
 	// Match /v2/<repo>/blobs/... or /v2/<repo>/manifests/...
-	if idx := strings.Index(rest, "/blobs/uploads"); idx != -1 {
-		repo := rest[:idx]
+	if repo, sub, ok := strings.Cut(rest, "/blobs/uploads"); ok {
 		if !s.authorizeOCI(w, r, repo, "push") {
 			return
 		}
-		s.handleBlobUpload(w, r, repo, rest[idx+len("/blobs/uploads"):])
+		s.handleBlobUpload(w, r, repo, sub)
 		return
 	}
-	if idx := strings.Index(rest, "/blobs/"); idx != -1 {
-		repo := rest[:idx]
-		digest := rest[idx+len("/blobs/"):]
+	if repo, digest, ok := strings.Cut(rest, "/blobs/"); ok {
 		if !s.authorizeOCI(w, r, repo, "pull") {
 			return
 		}
 		s.handleBlobDownload(w, r, digest)
 		return
 	}
-	if idx := strings.Index(rest, "/manifests/"); idx != -1 {
-		repo := rest[:idx]
-		ref := rest[idx+len("/manifests/"):]
+	if repo, ref, ok := strings.Cut(rest, "/manifests/"); ok {
 		action := "pull"
 		if r.Method == http.MethodPut || r.Method == http.MethodDelete {
 			action = "push"
@@ -729,7 +746,7 @@ func (s *Server) handleManifest(w http.ResponseWriter, r *http.Request, repo, re
 	http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 }
 
-func writeJSON(w http.ResponseWriter, code int, v interface{}) {
+func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(v)

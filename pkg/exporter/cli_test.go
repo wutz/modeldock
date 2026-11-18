@@ -79,7 +79,8 @@ func TestCLIBinariesEndToEnd(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(srcDir, "model.safetensors"), buildSafetensors(t, 128*1024), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(srcDir, "config.json"), []byte(`{"model_type":"qwen2","architectures":["Qwen2ForCausalLM"]}`), 0o644); err != nil {
+	cfgBytes := []byte(`{"model_type":"qwen2","architectures":["Qwen2ForCausalLM"]}`)
+	if err := os.WriteFile(filepath.Join(srcDir, "config.json"), cfgBytes, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	origWeights, _ := os.ReadFile(filepath.Join(srcDir, "model.safetensors"))

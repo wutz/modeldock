@@ -65,6 +65,12 @@ type InspectionResult struct {
 	LoRASpec            *modeldockv1alpha1.LoRASpec
 }
 
+const (
+	defaultRecommendedEngine = "vllm"
+	precisionFP8             = "FP8"
+	precisionINT8            = "INT8"
+)
+
 var defaultTrainingStateExcludes = []string{
 	"optimizer.pt",
 	"optimizer*.pt",
@@ -80,7 +86,11 @@ var defaultTrainingStateExcludes = []string{
 }
 
 // InspectDir performs security validation, file classification, and metadata extraction on a local model directory.
-func InspectDir(root string, artifactType modeldockv1alpha1.ArtifactType, opts InspectOptions) (*InspectionResult, error) {
+func InspectDir(
+	root string,
+	artifactType modeldockv1alpha1.ArtifactType,
+	opts InspectOptions,
+) (*InspectionResult, error) {
 	realRoot, err := filepath.EvalSymlinks(root)
 	if err != nil {
 		return nil, fmt.Errorf("resolve model directory %q: %w", root, err)
@@ -95,7 +105,7 @@ func InspectDir(root string, artifactType modeldockv1alpha1.ArtifactType, opts I
 
 	res := &InspectionResult{
 		ServingProfile: &modeldockv1alpha1.ServingProfile{
-			RecommendedEngine: "vllm",
+			RecommendedEngine: defaultRecommendedEngine,
 		},
 	}
 
@@ -106,84 +116,7 @@ func InspectDir(root string, artifactType modeldockv1alpha1.ArtifactType, opts I
 		if path == realRoot {
 			return nil
 		}
-
-		// Symlink escape defense.
-		resolved, err := filepath.EvalSymlinks(path)
-		if err != nil {
-			return fmt.Errorf("cannot resolve path %q: %w", path, err)
-		}
-		relCheck, err := filepath.Rel(realRoot, resolved)
-		if err != nil || strings.HasPrefix(relCheck, "..") || filepath.IsAbs(relCheck) {
-			return fmt.Errorf("security violation: path %q escapes model root via symlink", path)
-		}
-
-		rel, err := filepath.Rel(realRoot, path)
-		if err != nil {
-			return err
-		}
-		relSlash := filepath.ToSlash(rel)
-
-		if d.IsDir() {
-			if !opts.IncludeTrainingStates && matchesAnyPattern(relSlash, defaultTrainingStateExcludes) {
-				return filepath.SkipDir
-			}
-			if matchesAnyPattern(relSlash, opts.ExcludePatterns) {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-
-		if !opts.IncludeTrainingStates && matchesAnyPattern(relSlash, defaultTrainingStateExcludes) {
-			return nil
-		}
-		if matchesAnyPattern(relSlash, opts.ExcludePatterns) {
-			return nil
-		}
-		if len(opts.IncludePatterns) > 0 && !matchesAnyPattern(relSlash, opts.IncludePatterns) {
-			return nil
-		}
-
-		fi, err := d.Info()
-		if err != nil {
-			return err
-		}
-		size := fi.Size()
-
-		if isWeightFile(relSlash) {
-			if size == 0 {
-				return fmt.Errorf("weight file %q is empty", relSlash)
-			}
-			if isUnsafePickleWeight(relSlash) {
-				if !opts.AllowUnsafeFormats {
-					return fmt.Errorf("unsafe pickle weight format %q blocked (set allowUnsafeFormats=true to override)", relSlash)
-				}
-				res.UnsafeSerialization = true
-			}
-			var hdrSize int64
-			if strings.HasSuffix(strings.ToLower(relSlash), ".safetensors") {
-				hs, _, _, err := InspectSafetensorsFile(resolved)
-				if err != nil {
-					return fmt.Errorf("invalid safetensors file %q: %w", relSlash, err)
-				}
-				hdrSize = hs
-			}
-			res.WeightFiles = append(res.WeightFiles, WeightFile{
-				RelPath:               relSlash,
-				AbsPath:               resolved,
-				Size:                  size,
-				SafetensorsHeaderSize: hdrSize,
-			})
-			res.WeightSizeBytes += size
-			res.TotalSizeBytes += size
-		} else {
-			res.ConfigFiles = append(res.ConfigFiles, ConfigFile{
-				RelPath: relSlash,
-				AbsPath: resolved,
-				Size:    size,
-			})
-			res.TotalSizeBytes += size
-		}
-		return nil
+		return inspectWalkEntry(realRoot, path, d, opts, res)
 	})
 	if err != nil {
 		return nil, err
@@ -205,10 +138,106 @@ func InspectDir(root string, artifactType modeldockv1alpha1.ArtifactType, opts I
 	return res, nil
 }
 
+func inspectWalkEntry(
+	realRoot, path string,
+	d fs.DirEntry,
+	opts InspectOptions,
+	res *InspectionResult,
+) error {
+	// Symlink escape defense.
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return fmt.Errorf("cannot resolve path %q: %w", path, err)
+	}
+	relCheck, err := filepath.Rel(realRoot, resolved)
+	if err != nil || strings.HasPrefix(relCheck, "..") || filepath.IsAbs(relCheck) {
+		return fmt.Errorf("security violation: path %q escapes model root via symlink", path)
+	}
+
+	rel, err := filepath.Rel(realRoot, path)
+	if err != nil {
+		return err
+	}
+	relSlash := filepath.ToSlash(rel)
+
+	if shouldSkipPath(relSlash, opts) {
+		if d.IsDir() {
+			return filepath.SkipDir
+		}
+		return nil
+	}
+	if d.IsDir() {
+		return nil
+	}
+	if len(opts.IncludePatterns) > 0 && !matchesAnyPattern(relSlash, opts.IncludePatterns) {
+		return nil
+	}
+
+	fi, err := d.Info()
+	if err != nil {
+		return err
+	}
+	size := fi.Size()
+	if !isWeightFile(relSlash) {
+		res.ConfigFiles = append(res.ConfigFiles, ConfigFile{
+			RelPath: relSlash,
+			AbsPath: resolved,
+			Size:    size,
+		})
+		res.TotalSizeBytes += size
+		return nil
+	}
+	return recordWeightFile(relSlash, resolved, size, opts, res)
+}
+
+func shouldSkipPath(relSlash string, opts InspectOptions) bool {
+	if !opts.IncludeTrainingStates && matchesAnyPattern(relSlash, defaultTrainingStateExcludes) {
+		return true
+	}
+	return matchesAnyPattern(relSlash, opts.ExcludePatterns)
+}
+
+func recordWeightFile(
+	relSlash, resolved string,
+	size int64,
+	opts InspectOptions,
+	res *InspectionResult,
+) error {
+	if size == 0 {
+		return fmt.Errorf("weight file %q is empty", relSlash)
+	}
+	if isUnsafePickleWeight(relSlash) {
+		if !opts.AllowUnsafeFormats {
+			return fmt.Errorf(
+				"unsafe pickle weight format %q blocked (set allowUnsafeFormats=true to override)",
+				relSlash,
+			)
+		}
+		res.UnsafeSerialization = true
+	}
+	var hdrSize int64
+	if strings.HasSuffix(strings.ToLower(relSlash), ".safetensors") {
+		hs, _, _, err := InspectSafetensorsFile(resolved)
+		if err != nil {
+			return fmt.Errorf("invalid safetensors file %q: %w", relSlash, err)
+		}
+		hdrSize = hs
+	}
+	res.WeightFiles = append(res.WeightFiles, WeightFile{
+		RelPath:               relSlash,
+		AbsPath:               resolved,
+		Size:                  size,
+		SafetensorsHeaderSize: hdrSize,
+	})
+	res.WeightSizeBytes += size
+	res.TotalSizeBytes += size
+	return nil
+}
+
 // PopulateMetadataFromDir parses config.json, tokenizer_config.json, adapter_config.json, and weight stats.
 func PopulateMetadataFromDir(dir string, artifactType modeldockv1alpha1.ArtifactType, res *InspectionResult) error {
 	if res.ServingProfile == nil {
-		res.ServingProfile = &modeldockv1alpha1.ServingProfile{RecommendedEngine: "vllm"}
+		res.ServingProfile = &modeldockv1alpha1.ServingProfile{RecommendedEngine: defaultRecommendedEngine}
 	}
 
 	// Determine serialization format.
@@ -221,7 +250,7 @@ func PopulateMetadataFromDir(dir string, artifactType modeldockv1alpha1.Artifact
 
 	// Read tokenizer_config.json or chat_template.jinja.
 	if raw, err := os.ReadFile(filepath.Join(dir, "tokenizer_config.json")); err == nil {
-		var tok map[string]interface{}
+		var tok map[string]any
 		if json.Unmarshal(raw, &tok) == nil {
 			if ct, ok := tok["chat_template"]; ok && ct != nil && ct != "" {
 				res.ServingProfile.HasChatTemplate = true
@@ -250,11 +279,11 @@ func PopulateMetadataFromDir(dir string, artifactType modeldockv1alpha1.Artifact
 
 // ParseModelConfigJSON extracts architecture, context length, precision, and trust_remote_code hints from config.json.
 func ParseModelConfigJSON(raw []byte, sp *modeldockv1alpha1.ServingProfile) {
-	var cfg map[string]interface{}
+	var cfg map[string]any
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		return
 	}
-	if archs, ok := cfg["architectures"].([]interface{}); ok && len(archs) > 0 {
+	if archs, ok := cfg["architectures"].([]any); ok && len(archs) > 0 {
 		if s, ok := archs[0].(string); ok {
 			sp.Architecture = s
 		}
@@ -273,7 +302,7 @@ func ParseModelConfigJSON(raw []byte, sp *modeldockv1alpha1.ServingProfile) {
 	if dtype, ok := cfg["torch_dtype"].(string); ok {
 		sp.Precision = normalizePrecision(dtype)
 	}
-	if qcfg, ok := cfg["quantization_config"].(map[string]interface{}); ok {
+	if qcfg, ok := cfg["quantization_config"].(map[string]any); ok {
 		if qm, ok := qcfg["quant_method"].(string); ok {
 			bits, _ := qcfg["bits"].(float64)
 			switch strings.ToLower(qm) {
@@ -282,10 +311,10 @@ func ParseModelConfigJSON(raw []byte, sp *modeldockv1alpha1.ServingProfile) {
 			case "gptq":
 				sp.Precision = "INT4-GPTQ"
 			case "fp8":
-				sp.Precision = "FP8"
+				sp.Precision = precisionFP8
 			default:
 				if bits == 8 {
-					sp.Precision = "INT8"
+					sp.Precision = precisionINT8
 				}
 			}
 		}
@@ -379,9 +408,14 @@ func InspectSafetensorsFile(path string) (int64, int64, string, error) {
 }
 
 // FinalizeServingProfile fills precision, parameter size, VRAM estimate, and TP recommendation.
-func FinalizeServingProfile(artifactType modeldockv1alpha1.ArtifactType, weights []WeightFile, weightBytes int64, sp *modeldockv1alpha1.ServingProfile) {
+func FinalizeServingProfile(
+	artifactType modeldockv1alpha1.ArtifactType,
+	weights []WeightFile,
+	weightBytes int64,
+	sp *modeldockv1alpha1.ServingProfile,
+) {
 	if sp.RecommendedEngine == "" {
-		sp.RecommendedEngine = "vllm"
+		sp.RecommendedEngine = defaultRecommendedEngine
 	}
 	if sp.SerializationFormat == "" {
 		sp.SerializationFormat = detectSerializationFormat(weights)
@@ -410,10 +444,7 @@ func FinalizeServingProfile(artifactType modeldockv1alpha1.ArtifactType, weights
 	}
 
 	if artifactType == modeldockv1alpha1.ArtifactTypeLoRAAdapter {
-		vram := int32(math.Ceil(float64(weightBytes)/(1024*1024*1024))) + 1
-		if vram < 1 {
-			vram = 1
-		}
+		vram := max(int32(math.Ceil(float64(weightBytes)/(1024*1024*1024)))+1, 1)
 		if sp.MinVRAMGiB == 0 {
 			sp.MinVRAMGiB = vram
 		}
@@ -423,10 +454,7 @@ func FinalizeServingProfile(artifactType modeldockv1alpha1.ArtifactType, weights
 	if sp.MinVRAMGiB == 0 {
 		weightGiB := float64(weightBytes) / (1024 * 1024 * 1024)
 		// Add ~15% KV cache & activation headroom, minimum 1 GiB.
-		est := int32(math.Ceil(weightGiB * 1.15))
-		if est < 1 {
-			est = 1
-		}
+		est := max(int32(math.Ceil(weightGiB*1.15)), 1)
 		sp.MinVRAMGiB = est
 	}
 	if sp.RecommendedTensorParallel == 0 {
@@ -514,16 +542,16 @@ func normalizePrecision(s string) string {
 		return "FP16"
 	case "F32", "FP32", "FLOAT32":
 		return "FP32"
-	case "F8_E4M3", "F8_E5M2", "FP8", "FLOAT8_E4M3FN":
-		return "FP8"
-	case "I8", "INT8":
-		return "INT8"
+	case "F8_E4M3", "F8_E5M2", precisionFP8, "FLOAT8_E4M3FN":
+		return precisionFP8
+	case "I8", precisionINT8:
+		return precisionINT8
 	default:
 		return "Unknown"
 	}
 }
 
-func estimateParamsFromConfig(cfg map[string]interface{}) int64 {
+func estimateParamsFromConfig(cfg map[string]any) int64 {
 	h, _ := cfg["hidden_size"].(float64)
 	l, _ := cfg["num_hidden_layers"].(float64)
 	v, _ := cfg["vocab_size"].(float64)
@@ -564,8 +592,7 @@ func matchesAnyPattern(relSlash string, patterns []string) bool {
 		if pat == "" {
 			continue
 		}
-		if strings.HasSuffix(pat, "/**") {
-			prefix := strings.TrimSuffix(pat, "/**")
+		if prefix, ok := strings.CutSuffix(pat, "/**"); ok {
 			if relSlash == prefix || strings.HasPrefix(relSlash, prefix+"/") {
 				return true
 			}

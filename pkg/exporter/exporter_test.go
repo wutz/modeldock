@@ -38,8 +38,8 @@ import (
 
 func buildSafetensors(t *testing.T, byteLen int) []byte {
 	t.Helper()
-	hdrRaw, _ := json.Marshal(map[string]interface{}{
-		"layer.0.weight": map[string]interface{}{
+	hdrRaw, _ := json.Marshal(map[string]any{
+		"layer.0.weight": map[string]any{
 			"dtype":        "BF16",
 			"shape":        []int{64, byteLen / 128},
 			"data_offsets": []int{0, byteLen},
@@ -50,13 +50,14 @@ func buildSafetensors(t *testing.T, byteLen int) []byte {
 	binary.LittleEndian.PutUint64(lenBuf[:], uint64(len(hdrRaw)))
 	buf.Write(lenBuf[:])
 	buf.Write(hdrRaw)
-	for i := 0; i < byteLen; i++ {
+	for i := range byteLen {
 		buf.WriteByte(byte((i*31 + 7) & 0xff))
 	}
 	return buf.Bytes()
 }
 
 func TestEndToEndExportAndPullDataPlane(t *testing.T) {
+	const testLoRARepo = "models-acme/qwen3-lora"
 	ctx := context.Background()
 	srv := harbortest.NewServer()
 	defer srv.Close()
@@ -75,8 +76,12 @@ func TestEndToEndExportAndPullDataPlane(t *testing.T) {
 
 	// Build local model dir (LoRA + shard1 + shard2)
 	srcDir := t.TempDir()
-	_ = os.WriteFile(filepath.Join(srcDir, "config.json"), []byte(`{"architectures":["Qwen3ForCausalLM"],"torch_dtype":"bfloat16","max_position_embeddings":32768}`), 0o644)
-	_ = os.WriteFile(filepath.Join(srcDir, "adapter_config.json"), []byte(`{"r":32,"lora_alpha":64,"target_modules":["q_proj","v_proj"],"base_model_name_or_path":"Qwen/Qwen3-32B"}`), 0o644)
+	_ = os.WriteFile(filepath.Join(srcDir, "config.json"),
+		[]byte(`{"architectures":["Qwen3ForCausalLM"],"torch_dtype":"bfloat16","max_position_embeddings":32768}`),
+		0o644)
+	_ = os.WriteFile(filepath.Join(srcDir, "adapter_config.json"),
+		[]byte(`{"r":32,"lora_alpha":64,"target_modules":["q_proj","v_proj"],"base_model_name_or_path":"Qwen/Qwen3-32B"}`),
+		0o644)
 	shard1 := buildSafetensors(t, 64*1024)
 	shard2 := buildSafetensors(t, 48*1024)
 	_ = os.WriteFile(filepath.Join(srcDir, "adapter_model-00001.safetensors"), shard1, 0o644)
@@ -97,7 +102,7 @@ func TestEndToEndExportAndPullDataPlane(t *testing.T) {
 		SourceDir: srcDir,
 		CommonOptions: exporter.CommonOptions{
 			RegistryClient: pushClient,
-			Repository:     "models-acme/qwen3-lora",
+			Repository:     testLoRARepo,
 			VersionTag:     "v1.0.0",
 			ArtifactType:   modeldockv1alpha1.ArtifactTypeLoRAAdapter,
 			Concurrency:    4,
@@ -125,7 +130,7 @@ func TestEndToEndExportAndPullDataPlane(t *testing.T) {
 		SourceDir: srcDir,
 		CommonOptions: exporter.CommonOptions{
 			RegistryClient: pushClient,
-			Repository:     "models-acme/qwen3-lora",
+			Repository:     testLoRARepo,
 			VersionTag:     "v1.0.1",
 			ArtifactType:   modeldockv1alpha1.ArtifactTypeLoRAAdapter,
 			Concurrency:    4,
@@ -136,7 +141,10 @@ func TestEndToEndExportAndPullDataPlane(t *testing.T) {
 		t.Fatalf("re-export failed: %v", err)
 	}
 	if res2.SkippedBlobCount != 7 || res2.BytesTransferred > 1024 {
-		t.Fatalf("expected all 7 layer blobs skipped on dedup and only small config uploaded, got bytes=%d skipped=%d", res2.BytesTransferred, res2.SkippedBlobCount)
+		t.Fatalf(
+			"expected all 7 layer blobs skipped on dedup and only small config uploaded, got bytes=%d skipped=%d",
+			res2.BytesTransferred, res2.SkippedBlobCount,
+		)
 	}
 
 	// 3. Verify PullRobot is strictly read-only (cannot push)
@@ -148,7 +156,8 @@ func TestEndToEndExportAndPullDataPlane(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := pullClient.PushBlobBytes(ctx, "models-acme/qwen3-lora", "sha256:0000000000000000000000000000000000000000000000000000000000000000", []byte("x")); err == nil {
+	zeroDigest := "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+	if err := pullClient.PushBlobBytes(ctx, testLoRARepo, zeroDigest, []byte("x")); err == nil {
 		t.Fatalf("expected pull-only robot to be rejected on push")
 	}
 
@@ -156,7 +165,7 @@ func TestEndToEndExportAndPullDataPlane(t *testing.T) {
 	casRoot := t.TempDir()
 	pullRes, err := puller.Pull(ctx, puller.PullOptions{
 		RegistryClient: pullClient,
-		Repository:     "models-acme/qwen3-lora",
+		Repository:     testLoRARepo,
 		Reference:      res.Digest,
 		CacheRoot:      casRoot,
 		Strategy:       modeldockv1alpha1.CacheStrategySharedFilesystem,
@@ -180,7 +189,7 @@ func TestEndToEndExportAndPullDataPlane(t *testing.T) {
 	// Second Pull must be idempotent 0-byte fast hit
 	pullRes2, err := puller.Pull(ctx, puller.PullOptions{
 		RegistryClient: pullClient,
-		Repository:     "models-acme/qwen3-lora",
+		Repository:     testLoRARepo,
 		Reference:      res.Digest,
 		CacheRoot:      casRoot,
 		Strategy:       modeldockv1alpha1.CacheStrategySharedFilesystem,
@@ -194,7 +203,7 @@ func TestEndToEndExportAndPullDataPlane(t *testing.T) {
 		SourceDir: srcDir,
 		CommonOptions: exporter.CommonOptions{
 			RegistryClient: pushClient,
-			Repository:     "models-acme/qwen3-lora",
+			Repository:     testLoRARepo,
 			VersionTag:     "v2.0.0",
 			ArtifactType:   modeldockv1alpha1.ArtifactTypeLoRAAdapter,
 		},
@@ -205,7 +214,7 @@ func TestEndToEndExportAndPullDataPlane(t *testing.T) {
 	nvmeRoot := t.TempDir()
 	nvmeRes, err := puller.Pull(ctx, puller.PullOptions{
 		RegistryClient: pullClient,
-		Repository:     "models-acme/qwen3-lora",
+		Repository:     testLoRARepo,
 		Reference:      resNoChunk.Digest,
 		CacheRoot:      nvmeRoot,
 		Strategy:       modeldockv1alpha1.CacheStrategyNodeLocalNVMe,
@@ -215,7 +224,9 @@ func TestEndToEndExportAndPullDataPlane(t *testing.T) {
 	}
 
 	// Evict test
-	evicted, err := puller.EvictUnused(casRoot, modeldockv1alpha1.CacheStrategySharedFilesystem, map[string]struct{}{}, -time.Second)
+	evicted, err := puller.EvictUnused(
+		casRoot, modeldockv1alpha1.CacheStrategySharedFilesystem, map[string]struct{}{}, -time.Second,
+	)
 	if err != nil || evicted != 1 {
 		t.Fatalf("expected 1 evicted dir, got %d err=%v", evicted, err)
 	}

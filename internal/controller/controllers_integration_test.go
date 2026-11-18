@@ -31,7 +31,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	modeldockv1alpha1 "github.com/wutz/modeldock/api/v1alpha1"
@@ -41,8 +40,8 @@ import (
 )
 
 func buildTestSafetensors(byteLen int) []byte {
-	hdrRaw, _ := json.Marshal(map[string]interface{}{
-		"model.weight": map[string]interface{}{
+	hdrRaw, _ := json.Marshal(map[string]any{
+		"model.weight": map[string]any{
 			"dtype":        "BF16",
 			"shape":        []int{32, byteLen / 64},
 			"data_offsets": []int{0, byteLen},
@@ -60,11 +59,13 @@ func buildTestSafetensors(byteLen int) []byte {
 var _ = Describe("ModelDock Controllers End-to-End Integration", func() {
 	const timeout = 15 * time.Second
 	const interval = 200 * time.Millisecond
+	const testNamespace = "forge-acme"
+	const testRepoName = "qwen3-sft"
 
 	It("reconciles ModelRepository -> ModelExport -> ModelArtifact -> auto-warmup ModelCache -> consumer tracking", func() {
 		ns := &corev1.Namespace{
 			ObjectMeta: metav1.ObjectMeta{
-				Name: "forge-acme",
+				Name: testNamespace,
 				Labels: map[string]string{
 					modeldockv1alpha1.LabelWorkspaceProject: "acme",
 				},
@@ -75,8 +76,8 @@ var _ = Describe("ModelDock Controllers End-to-End Integration", func() {
 		By("1. Creating ModelRepository and verifying Harbor project + Robot secrets")
 		mrepo := &modeldockv1alpha1.ModelRepository{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      "qwen3-sft",
-				Namespace: "forge-acme",
+				Name:      testRepoName,
+				Namespace: testNamespace,
 			},
 			Spec: modeldockv1alpha1.ModelRepositorySpec{
 				DisplayName:      "Qwen3 SFT",
@@ -84,7 +85,7 @@ var _ = Describe("ModelDock Controllers End-to-End Integration", func() {
 				Visibility:       modeldockv1alpha1.VisibilityPrivate,
 				AutoWarmupStages: []modeldockv1alpha1.ArtifactStage{modeldockv1alpha1.StageProduction},
 				RetentionPolicy: &modeldockv1alpha1.RetentionPolicy{
-					KeepLastStagingVersions: ptr.To(int32(1)),
+					KeepLastStagingVersions: new(int32(1)),
 				},
 			},
 		}
@@ -92,7 +93,7 @@ var _ = Describe("ModelDock Controllers End-to-End Integration", func() {
 
 		Eventually(func(g Gomega) {
 			var cur modeldockv1alpha1.ModelRepository
-			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: "forge-acme", Name: "qwen3-sft"}, &cur)).To(Succeed())
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: testRepoName}, &cur)).To(Succeed())
 			g.Expect(cur.Status.Phase).To(Equal(modeldockv1alpha1.RepositoryPhaseReady))
 			g.Expect(cur.Status.OCIRepository).To(ContainSubstring("/models-acme/qwen3-sft"))
 			g.Expect(cur.Status.PullSecretName).To(Equal("mrepo-qwen3-sft-pull"))
@@ -100,14 +101,14 @@ var _ = Describe("ModelDock Controllers End-to-End Integration", func() {
 		}, timeout, interval).Should(Succeed())
 
 		var pullSec, pushSec corev1.Secret
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: "forge-acme", Name: "mrepo-qwen3-sft-pull"}, &pullSec)).To(Succeed())
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: "forge-acme", Name: "mrepo-qwen3-sft-push"}, &pushSec)).To(Succeed())
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: "mrepo-qwen3-sft-pull"}, &pullSec)).To(Succeed())
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: "mrepo-qwen3-sft-push"}, &pushSec)).To(Succeed())
 		oldPullUser := string(pullSec.Data["username"])
 
 		By("2. Rotating Robot credentials via annotation")
 		Eventually(func(g Gomega) {
 			var cur modeldockv1alpha1.ModelRepository
-			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: "forge-acme", Name: "qwen3-sft"}, &cur)).To(Succeed())
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: testRepoName}, &cur)).To(Succeed())
 			if cur.Annotations == nil {
 				cur.Annotations = map[string]string{}
 			}
@@ -117,18 +118,18 @@ var _ = Describe("ModelDock Controllers End-to-End Integration", func() {
 
 		Eventually(func(g Gomega) {
 			var sec corev1.Secret
-			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: "forge-acme", Name: "mrepo-qwen3-sft-pull"}, &sec)).To(Succeed())
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: "mrepo-qwen3-sft-pull"}, &sec)).To(Succeed())
 			// Secret gets updated with new token
 			g.Expect(string(sec.Data["username"])).To(Equal(oldPullUser))
 			var cur modeldockv1alpha1.ModelRepository
-			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: "forge-acme", Name: "qwen3-sft"}, &cur)).To(Succeed())
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: testRepoName}, &cur)).To(Succeed())
 			_, stillAnnotated := cur.Annotations[modeldockv1alpha1.AnnotationAction]
 			g.Expect(stillAnnotated).To(BeFalse())
 		}, timeout, interval).Should(Succeed())
 
 		By("3. Exporting a real model directory into Harbor and reconciling ModelExport Job")
 		// Re-read rotated push secret and run actual exporter against Harbor test server!
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: "forge-acme", Name: "mrepo-qwen3-sft-push"}, &pushSec)).To(Succeed())
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: "mrepo-qwen3-sft-push"}, &pushSec)).To(Succeed())
 		modelDir := GinkgoT().TempDir()
 		Expect(os.WriteFile(filepath.Join(modelDir, "config.json"), []byte(`{"architectures":["Qwen3ForCausalLM"],"torch_dtype":"bfloat16","max_position_embeddings":32768}`), 0o644)).To(Succeed())
 		Expect(os.WriteFile(filepath.Join(modelDir, "model.safetensors"), buildTestSafetensors(4096), 0o644)).To(Succeed())
@@ -154,10 +155,10 @@ var _ = Describe("ModelDock Controllers End-to-End Integration", func() {
 		mexp := &modeldockv1alpha1.ModelExport{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "export-v1",
-				Namespace: "forge-acme",
+				Namespace: testNamespace,
 			},
 			Spec: modeldockv1alpha1.ModelExportSpec{
-				TargetRepository: "qwen3-sft",
+				TargetRepository: testRepoName,
 				VersionTag:       "v1.0.0",
 				InitialStage:     modeldockv1alpha1.StageStaging,
 				ArtifactType:     modeldockv1alpha1.ArtifactTypeFullWeight,
@@ -174,7 +175,7 @@ var _ = Describe("ModelDock Controllers End-to-End Integration", func() {
 		// Verify ModelExportReconciler schedules non-privileged Job with ReadOnly PVC mount.
 		var job batchv1.Job
 		Eventually(func(g Gomega) {
-			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: "forge-acme", Name: "mexp-export-v1"}, &job)).To(Succeed())
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: "mexp-export-v1"}, &job)).To(Succeed())
 			c := job.Spec.Template.Spec.Containers[0]
 			g.Expect(*c.SecurityContext.Privileged).To(BeFalse())
 			g.Expect(*c.SecurityContext.AllowPrivilegeEscalation).To(BeFalse())
@@ -186,7 +187,7 @@ var _ = Describe("ModelDock Controllers End-to-End Integration", func() {
 		jobPod := &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "mexp-export-v1-pod",
-				Namespace: "forge-acme",
+				Namespace: testNamespace,
 				Labels:    map[string]string{"job-name": "mexp-export-v1"},
 			},
 			Spec: corev1.PodSpec{
@@ -223,7 +224,7 @@ var _ = Describe("ModelDock Controllers End-to-End Integration", func() {
 		var createdArtName string
 		Eventually(func(g Gomega) {
 			var cur modeldockv1alpha1.ModelExport
-			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: "forge-acme", Name: "export-v1"}, &cur)).To(Succeed())
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: "export-v1"}, &cur)).To(Succeed())
 			g.Expect(cur.Status.Phase).To(Equal(modeldockv1alpha1.ExportPhaseSucceeded))
 			g.Expect(cur.Status.ExportedDigest).To(Equal(expRes.Digest))
 			createdArtName = cur.Status.ArtifactName
@@ -233,14 +234,14 @@ var _ = Describe("ModelDock Controllers End-to-End Integration", func() {
 		By("4. Verifying ModelArtifact becomes Ready and promoting to Production triggers ModelCache")
 		Eventually(func(g Gomega) {
 			var mart modeldockv1alpha1.ModelArtifact
-			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: "forge-acme", Name: createdArtName}, &mart)).To(Succeed())
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: createdArtName}, &mart)).To(Succeed())
 			g.Expect(mart.Status.Phase).To(Equal(modeldockv1alpha1.ArtifactPhaseReady))
 			g.Expect(mart.Status.ShardCount).To(Equal(int32(1)))
 		}, timeout, interval).Should(Succeed())
 
 		Eventually(func(g Gomega) {
 			var mart modeldockv1alpha1.ModelArtifact
-			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: "forge-acme", Name: createdArtName}, &mart)).To(Succeed())
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: createdArtName}, &mart)).To(Succeed())
 			mart.Spec.Stage = modeldockv1alpha1.StageProduction
 			g.Expect(k8sClient.Update(ctx, &mart)).To(Succeed())
 		}, timeout, interval).Should(Succeed())
@@ -249,7 +250,7 @@ var _ = Describe("ModelDock Controllers End-to-End Integration", func() {
 		hc, err := harbor.NewHTTPClient(harborSrv.URL(), harborSrv.AdminUser, harborSrv.AdminPass, true)
 		Expect(err).NotTo(HaveOccurred())
 		Eventually(func(g Gomega) {
-			ha, err := hc.GetArtifact(ctx, "models-acme", "qwen3-sft", expRes.Digest)
+			ha, err := hc.GetArtifact(ctx, "models-acme", testRepoName, expRes.Digest)
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(ha).NotTo(BeNil())
 			hasProdTag := false
@@ -263,7 +264,7 @@ var _ = Describe("ModelDock Controllers End-to-End Integration", func() {
 
 		var caches modeldockv1alpha1.ModelCacheList
 		Eventually(func(g Gomega) {
-			g.Expect(k8sClient.List(ctx, &caches, client.InNamespace("forge-acme"))).To(Succeed())
+			g.Expect(k8sClient.List(ctx, &caches, client.InNamespace(testNamespace))).To(Succeed())
 			g.Expect(caches.Items).To(HaveLen(1))
 		}, timeout, interval).Should(Succeed())
 		mcName := caches.Items[0].Name
@@ -272,14 +273,14 @@ var _ = Describe("ModelDock Controllers End-to-End Integration", func() {
 		cacheJobName := SanitizeK8sName("mcache", mcName)
 		var cacheJob batchv1.Job
 		Eventually(func(g Gomega) {
-			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: "forge-acme", Name: cacheJobName}, &cacheJob)).To(Succeed())
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: cacheJobName}, &cacheJob)).To(Succeed())
 		}, timeout, interval).Should(Succeed())
 
 		// Add a simulated running vLLM consumer pod referencing this cache.
 		vllmPod := &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "vllm-worker-0",
-				Namespace: "forge-acme",
+				Namespace: testNamespace,
 				Labels:    map[string]string{modeldockv1alpha1.LabelConsumerCache: mcName},
 			},
 			Spec: corev1.PodSpec{
@@ -302,7 +303,7 @@ var _ = Describe("ModelDock Controllers End-to-End Integration", func() {
 
 		Eventually(func(g Gomega) {
 			var mc modeldockv1alpha1.ModelCache
-			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: "forge-acme", Name: mcName}, &mc)).To(Succeed())
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: mcName}, &mc)).To(Succeed())
 			g.Expect(mc.Status.Phase).To(Equal(modeldockv1alpha1.CachePhaseReady))
 			g.Expect(mc.Status.MountSpec).NotTo(BeNil())
 			g.Expect(mc.Status.MountSpec.Mode).To(Equal(modeldockv1alpha1.MountModeReadOnlyManyPVC))

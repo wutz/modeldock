@@ -19,7 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
-	"sort"
+	"slices"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -234,8 +234,8 @@ func (r *ModelRepositoryReconciler) reconcileArtifactsAndRetention(ctx context.C
 	if mrepo.Spec.RetentionPolicy != nil && mrepo.Spec.RetentionPolicy.KeepLastStagingVersions != nil {
 		keep := int(*mrepo.Spec.RetentionPolicy.KeepLastStagingVersions)
 		if len(stagingArtifacts) > keep {
-			sort.Slice(stagingArtifacts, func(i, j int) bool {
-				return stagingArtifacts[i].CreationTimestamp.After(stagingArtifacts[j].CreationTimestamp.Time)
+			slices.SortFunc(stagingArtifacts, func(a, b modeldockv1alpha1.ModelArtifact) int {
+				return b.CreationTimestamp.Compare(a.CreationTimestamp.Time)
 			})
 			for i := keep; i < len(stagingArtifacts); i++ {
 				stale := stagingArtifacts[i].DeepCopy()
@@ -247,8 +247,8 @@ func (r *ModelRepositoryReconciler) reconcileArtifactsAndRetention(ctx context.C
 
 	latestProd := ""
 	if len(prodArtifacts) > 0 {
-		sort.Slice(prodArtifacts, func(i, j int) bool {
-			return prodArtifacts[i].CreationTimestamp.After(prodArtifacts[j].CreationTimestamp.Time)
+		slices.SortFunc(prodArtifacts, func(a, b modeldockv1alpha1.ModelArtifact) int {
+			return b.CreationTimestamp.Compare(a.CreationTimestamp.Time)
 		})
 		latestProd = prodArtifacts[0].Name
 	}

@@ -111,8 +111,8 @@ func (s *Server) handleCatalog(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) readerForRequest(r *http.Request) (client.Reader, error) {
 	auth := r.Header.Get("Authorization")
-	if strings.HasPrefix(auth, "Bearer ") {
-		token := strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
+	if after, ok := strings.CutPrefix(auth, "Bearer "); ok {
+		token := strings.TrimSpace(after)
 		if token != "" && s.RestConfig != nil {
 			cfg := rest.CopyConfig(s.RestConfig)
 			cfg.BearerToken = token

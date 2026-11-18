@@ -92,19 +92,29 @@ func main() {
 	flag.StringVar(&webhookCertName, "webhook-cert-name", "tls.crt", "The name of the webhook certificate file.")
 	flag.StringVar(&webhookCertKey, "webhook-cert-key", "tls.key", "The name of the webhook key file.")
 	flag.IntVar(&webhookPort, "webhook-port", 9443, "Port the webhook server listens on. Set -1 to disable.")
-	flag.StringVar(&metricsCertPath, "metrics-cert-path", "", "The directory that contains the metrics server certificate.")
+	flag.StringVar(&metricsCertPath, "metrics-cert-path", "",
+		"The directory that contains the metrics server certificate.")
 	flag.StringVar(&metricsCertName, "metrics-cert-name", "tls.crt", "The name of the metrics server certificate file.")
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false, "If set, HTTP/2 will be enabled for metrics and webhook servers.")
-	flag.StringVar(&systemNamespace, "system-namespace", modeldockv1alpha1.DefaultSystemNamespace, "Namespace holding Harbor instance secrets.")
-	flag.StringVar(&exporterImage, "exporter-image", "ghcr.io/wutz/modeldock-exporter:latest", "Container image for modeldock-exporter Jobs.")
-	flag.StringVar(&pullerImage, "puller-image", "ghcr.io/wutz/modeldock-puller:latest", "Container image for modeldock-puller Jobs.")
-	flag.StringVar(&defaultCASPVC, "default-cas-pvc", "modeldock-cas-shared", "Default RWX PVC for SharedFilesystem ModelCache.")
-	flag.StringVar(&dragonflyProxyURL, "dragonfly-proxy-url", "", "Optional Dragonfly P2P HTTP proxy URL for ModelCache pulls.")
-	flag.StringVar(&harborWebhookAddr, "harbor-webhook-bind-address", ":8090", "Bind address for Harbor event webhook receiver (0 to disable).")
-	flag.StringVar(&harborWebhookSecret, "harbor-webhook-secret", os.Getenv("MODELDOCK_HARBOR_WEBHOOK_SECRET"), "Optional shared Bearer secret for Harbor webhooks.")
-	flag.StringVar(&uiAddr, "ui-bind-address", ":8091", "Bind address for read-only embedded ModelDock Catalog UI (0 to disable).")
-	flag.BoolVar(&uiRequireBearerToken, "ui-require-bearer-token", false, "Require caller K8s Bearer token for /api/v1/catalog.")
+	flag.StringVar(&systemNamespace, "system-namespace", modeldockv1alpha1.DefaultSystemNamespace,
+		"Namespace holding Harbor instance secrets.")
+	flag.StringVar(&exporterImage, "exporter-image", "ghcr.io/wutz/modeldock-exporter:latest",
+		"Container image for modeldock-exporter Jobs.")
+	flag.StringVar(&pullerImage, "puller-image", "ghcr.io/wutz/modeldock-puller:latest",
+		"Container image for modeldock-puller Jobs.")
+	flag.StringVar(&defaultCASPVC, "default-cas-pvc", "modeldock-cas-shared",
+		"Default RWX PVC for SharedFilesystem ModelCache.")
+	flag.StringVar(&dragonflyProxyURL, "dragonfly-proxy-url", "",
+		"Optional Dragonfly P2P HTTP proxy URL for ModelCache pulls.")
+	flag.StringVar(&harborWebhookAddr, "harbor-webhook-bind-address", ":8090",
+		"Bind address for Harbor event webhook receiver (0 to disable).")
+	flag.StringVar(&harborWebhookSecret, "harbor-webhook-secret", os.Getenv("MODELDOCK_HARBOR_WEBHOOK_SECRET"),
+		"Optional shared Bearer secret for Harbor webhooks.")
+	flag.StringVar(&uiAddr, "ui-bind-address", ":8091",
+		"Bind address for read-only embedded ModelDock Catalog UI (0 to disable).")
+	flag.BoolVar(&uiRequireBearerToken, "ui-require-bearer-token", false,
+		"Require caller K8s Bearer token for /api/v1/catalog.")
 
 	opts := zap.Options{Development: true}
 	opts.BindFlags(flag.CommandLine)

@@ -91,7 +91,10 @@ func (r *Resolver) Resolve(ctx context.Context, instanceRef string) (*InstanceCo
 	// Fallback to environment variables when Secret is not present (dev/test).
 	endpoint := os.Getenv("MODELDOCK_HARBOR_ENDPOINT")
 	if endpoint == "" {
-		return nil, fmt.Errorf("harbor instance %q not found in namespace %q and MODELDOCK_HARBOR_ENDPOINT is unset", instanceRef, sysNS)
+		return nil, fmt.Errorf(
+			"harbor instance %q not found in namespace %q and MODELDOCK_HARBOR_ENDPOINT is unset",
+			instanceRef, sysNS,
+		)
 	}
 	insecure, _ := strconv.ParseBool(os.Getenv("MODELDOCK_HARBOR_INSECURE"))
 	return &InstanceConfig{

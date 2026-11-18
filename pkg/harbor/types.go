@@ -73,15 +73,15 @@ type Tag struct {
 
 // Artifact represents a Harbor v2 artifact summary.
 type Artifact struct {
-	ID                int64                  `json:"id,omitempty"`
-	Type              string                 `json:"type,omitempty"`
-	MediaType         string                 `json:"media_type,omitempty"`
-	ManifestMediaType string                 `json:"manifest_media_type,omitempty"`
-	Digest            string                 `json:"digest"`
-	Size              int64                  `json:"size"`
-	PushTime          time.Time              `json:"push_time,omitempty"`
-	Tags              []Tag                  `json:"tags,omitempty"`
-	ExtraAttrs        map[string]interface{} `json:"extra_attrs,omitempty"`
+	ID                int64          `json:"id,omitempty"`
+	Type              string         `json:"type,omitempty"`
+	MediaType         string         `json:"media_type,omitempty"`
+	ManifestMediaType string         `json:"manifest_media_type,omitempty"`
+	Digest            string         `json:"digest"`
+	Size              int64          `json:"size"`
+	PushTime          time.Time      `json:"push_time,omitempty"`
+	Tags              []Tag          `json:"tags,omitempty"`
+	ExtraAttrs        map[string]any `json:"extra_attrs,omitempty"`
 }
 
 // WebhookPayload models Harbor v2 webhook notification events.

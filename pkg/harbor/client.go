@@ -35,7 +35,9 @@ import (
 type Client interface {
 	Ping(ctx context.Context) error
 	EnsureProject(ctx context.Context, name string, public bool, storageLimitBytes *int64) (*Project, error)
-	EnsureProjectRobots(ctx context.Context, projectName, repoBaseName string, rotate bool) (pullRobot *Robot, pushRobot *Robot, err error)
+	EnsureProjectRobots(
+		ctx context.Context, projectName, repoBaseName string, rotate bool,
+	) (pullRobot *Robot, pushRobot *Robot, err error)
 	ListArtifacts(ctx context.Context, projectName, repoName string) ([]Artifact, error)
 	GetArtifact(ctx context.Context, projectName, repoName, reference string) (*Artifact, error)
 	AddArtifactTag(ctx context.Context, projectName, repoName, reference, tag string) error
@@ -76,7 +78,7 @@ func NewHTTPClient(baseURL, username, password string, insecureSkipTLS bool) (*H
 }
 
 func (c *HTTPClient) Ping(ctx context.Context) error {
-	resp, err := c.doJSON(ctx, http.MethodGet, "/api/v2.0/ping", nil, nil)
+	resp, err := c.doJSON(ctx, http.MethodGet, "/api/v2.0/ping", nil)
 	if err != nil {
 		return err
 	}
@@ -87,7 +89,9 @@ func (c *HTTPClient) Ping(ctx context.Context) error {
 	return nil
 }
 
-func (c *HTTPClient) EnsureProject(ctx context.Context, name string, public bool, storageLimitBytes *int64) (*Project, error) {
+func (c *HTTPClient) EnsureProject(
+	ctx context.Context, name string, public bool, storageLimitBytes *int64,
+) (*Project, error) {
 	if name == "" {
 		return nil, errors.New("project name cannot be empty")
 	}
@@ -97,7 +101,7 @@ func (c *HTTPClient) EnsureProject(ctx context.Context, name string, public bool
 		return nil, err
 	}
 	if proj == nil {
-		reqBody := map[string]interface{}{
+		reqBody := map[string]any{
 			"project_name": name,
 			"public":       public,
 			"metadata": map[string]string{
@@ -107,14 +111,17 @@ func (c *HTTPClient) EnsureProject(ctx context.Context, name string, public bool
 		if storageLimitBytes != nil {
 			reqBody["storage_limit"] = *storageLimitBytes
 		}
-		resp, err := c.doJSON(ctx, http.MethodPost, "/api/v2.0/projects", reqBody, nil)
+		resp, err := c.doJSON(ctx, http.MethodPost, "/api/v2.0/projects", reqBody)
 		if err != nil {
 			return nil, err
 		}
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		_ = resp.Body.Close()
 		if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusConflict {
-			return nil, fmt.Errorf("create harbor project %q returned %d: %s", name, resp.StatusCode, strings.TrimSpace(string(body)))
+			return nil, fmt.Errorf(
+				"create harbor project %q returned %d: %s",
+				name, resp.StatusCode, strings.TrimSpace(string(body)),
+			)
 		}
 		proj, err = c.getProjectByName(ctx, name)
 		if err != nil {
@@ -133,7 +140,7 @@ func (c *HTTPClient) EnsureProject(ctx context.Context, name string, public bool
 }
 
 func (c *HTTPClient) getProjectByName(ctx context.Context, name string) (*Project, error) {
-	resp, err := c.doJSON(ctx, http.MethodGet, "/api/v2.0/projects?name="+url.QueryEscape(name), nil, nil)
+	resp, err := c.doJSON(ctx, http.MethodGet, "/api/v2.0/projects?name="+url.QueryEscape(name), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -163,7 +170,7 @@ func (c *HTTPClient) getProjectByName(ctx context.Context, name string) (*Projec
 func (c *HTTPClient) updateProjectQuota(ctx context.Context, projectID, storageLimitBytes int64) error {
 	// List quotas for project and update if found.
 	path := fmt.Sprintf("/api/v2.0/quotas?reference=project&reference_id=%d", projectID)
-	resp, err := c.doJSON(ctx, http.MethodGet, path, nil, nil)
+	resp, err := c.doJSON(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return err
 	}
@@ -178,12 +185,12 @@ func (c *HTTPClient) updateProjectQuota(ctx context.Context, projectID, storageL
 	if err := json.Unmarshal(body, &quotas); err != nil || len(quotas) == 0 {
 		return nil
 	}
-	putBody := map[string]interface{}{
+	putBody := map[string]any{
 		"hard": map[string]int64{
 			"storage": storageLimitBytes,
 		},
 	}
-	putResp, err := c.doJSON(ctx, http.MethodPut, fmt.Sprintf("/api/v2.0/quotas/%d", quotas[0].ID), putBody, nil)
+	putResp, err := c.doJSON(ctx, http.MethodPut, fmt.Sprintf("/api/v2.0/quotas/%d", quotas[0].ID), putBody)
 	if err != nil {
 		return err
 	}
@@ -194,7 +201,9 @@ func (c *HTTPClient) updateProjectQuota(ctx context.Context, projectID, storageL
 // EnsureProjectRobots creates or rotates least-privilege project-scoped Pull and Push Robot Accounts.
 // Pull Robot: repository:pull only.
 // Push Robot: repository:pull + repository:push (NO delete permission).
-func (c *HTTPClient) EnsureProjectRobots(ctx context.Context, projectName, repoBaseName string, rotate bool) (*Robot, *Robot, error) {
+func (c *HTTPClient) EnsureProjectRobots(
+	ctx context.Context, projectName, repoBaseName string, rotate bool,
+) (*Robot, *Robot, error) {
 	existing, err := c.listProjectRobots(ctx, projectName)
 	if err != nil {
 		return nil, nil, err
@@ -245,14 +254,17 @@ func (c *HTTPClient) EnsureProjectRobots(ctx context.Context, projectName, repoB
 				},
 			},
 		}
-		resp, err := c.doJSON(ctx, http.MethodPost, "/api/v2.0/robots", req, nil)
+		resp, err := c.doJSON(ctx, http.MethodPost, "/api/v2.0/robots", req)
 		if err != nil {
 			return nil, err
 		}
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 256*1024))
 		_ = resp.Body.Close()
 		if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("create robot %s returned %d: %s", shortName, resp.StatusCode, strings.TrimSpace(string(body)))
+			return nil, fmt.Errorf(
+				"create robot %s returned %d: %s",
+				shortName, resp.StatusCode, strings.TrimSpace(string(body)),
+			)
 		}
 		var created Robot
 		if err := json.Unmarshal(body, &created); err != nil {
@@ -274,7 +286,7 @@ func (c *HTTPClient) EnsureProjectRobots(ctx context.Context, projectName, repoB
 
 func (c *HTTPClient) listProjectRobots(ctx context.Context, projectName string) ([]Robot, error) {
 	q := fmt.Sprintf("/api/v2.0/robots?q=%s&page_size=100", url.QueryEscape("Level=project"))
-	resp, err := c.doJSON(ctx, http.MethodGet, q, nil, nil)
+	resp, err := c.doJSON(ctx, http.MethodGet, q, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -300,12 +312,14 @@ func (c *HTTPClient) listProjectRobots(ctx context.Context, projectName string) 
 }
 
 func (c *HTTPClient) deleteRobot(ctx context.Context, id int64) error {
-	resp, err := c.doJSON(ctx, http.MethodDelete, fmt.Sprintf("/api/v2.0/robots/%d", id), nil, nil)
+	resp, err := c.doJSON(ctx, http.MethodDelete, fmt.Sprintf("/api/v2.0/robots/%d", id), nil)
 	if err != nil {
 		return err
 	}
 	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusNotFound {
+	if resp.StatusCode != http.StatusOK &&
+		resp.StatusCode != http.StatusNoContent &&
+		resp.StatusCode != http.StatusNotFound {
 		return fmt.Errorf("delete robot %d returned %d", id, resp.StatusCode)
 	}
 	return nil
@@ -314,7 +328,7 @@ func (c *HTTPClient) deleteRobot(ctx context.Context, id int64) error {
 func (c *HTTPClient) ListArtifacts(ctx context.Context, projectName, repoName string) ([]Artifact, error) {
 	path := fmt.Sprintf("/api/v2.0/projects/%s/repositories/%s/artifacts?with_tag=true&page_size=100",
 		url.PathEscape(projectName), doubleEscapeRepo(repoName))
-	resp, err := c.doJSON(ctx, http.MethodGet, path, nil, nil)
+	resp, err := c.doJSON(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -339,7 +353,7 @@ func (c *HTTPClient) ListArtifacts(ctx context.Context, projectName, repoName st
 func (c *HTTPClient) GetArtifact(ctx context.Context, projectName, repoName, reference string) (*Artifact, error) {
 	path := fmt.Sprintf("/api/v2.0/projects/%s/repositories/%s/artifacts/%s?with_tag=true",
 		url.PathEscape(projectName), doubleEscapeRepo(repoName), url.PathEscape(reference))
-	resp, err := c.doJSON(ctx, http.MethodGet, path, nil, nil)
+	resp, err := c.doJSON(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -364,13 +378,15 @@ func (c *HTTPClient) GetArtifact(ctx context.Context, projectName, repoName, ref
 func (c *HTTPClient) AddArtifactTag(ctx context.Context, projectName, repoName, reference, tag string) error {
 	path := fmt.Sprintf("/api/v2.0/projects/%s/repositories/%s/artifacts/%s/tags",
 		url.PathEscape(projectName), doubleEscapeRepo(repoName), url.PathEscape(reference))
-	resp, err := c.doJSON(ctx, http.MethodPost, path, map[string]string{"name": tag}, nil)
+	resp, err := c.doJSON(ctx, http.MethodPost, path, map[string]string{"name": tag})
 	if err != nil {
 		return err
 	}
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusConflict {
+	if resp.StatusCode != http.StatusCreated &&
+		resp.StatusCode != http.StatusOK &&
+		resp.StatusCode != http.StatusConflict {
 		return fmt.Errorf("add tag %q returned %d: %s", tag, resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	return nil
@@ -379,12 +395,14 @@ func (c *HTTPClient) AddArtifactTag(ctx context.Context, projectName, repoName, 
 func (c *HTTPClient) DeleteArtifactTag(ctx context.Context, projectName, repoName, reference, tag string) error {
 	path := fmt.Sprintf("/api/v2.0/projects/%s/repositories/%s/artifacts/%s/tags/%s",
 		url.PathEscape(projectName), doubleEscapeRepo(repoName), url.PathEscape(reference), url.PathEscape(tag))
-	resp, err := c.doJSON(ctx, http.MethodDelete, path, nil, nil)
+	resp, err := c.doJSON(ctx, http.MethodDelete, path, nil)
 	if err != nil {
 		return err
 	}
 	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusNotFound {
+	if resp.StatusCode != http.StatusOK &&
+		resp.StatusCode != http.StatusNoContent &&
+		resp.StatusCode != http.StatusNotFound {
 		return fmt.Errorf("delete tag %q returned %d", tag, resp.StatusCode)
 	}
 	return nil
@@ -393,18 +411,20 @@ func (c *HTTPClient) DeleteArtifactTag(ctx context.Context, projectName, repoNam
 func (c *HTTPClient) DeleteArtifact(ctx context.Context, projectName, repoName, reference string) error {
 	path := fmt.Sprintf("/api/v2.0/projects/%s/repositories/%s/artifacts/%s",
 		url.PathEscape(projectName), doubleEscapeRepo(repoName), url.PathEscape(reference))
-	resp, err := c.doJSON(ctx, http.MethodDelete, path, nil, nil)
+	resp, err := c.doJSON(ctx, http.MethodDelete, path, nil)
 	if err != nil {
 		return err
 	}
 	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusNotFound {
+	if resp.StatusCode != http.StatusOK &&
+		resp.StatusCode != http.StatusNoContent &&
+		resp.StatusCode != http.StatusNotFound {
 		return fmt.Errorf("delete artifact %q returned %d", reference, resp.StatusCode)
 	}
 	return nil
 }
 
-func (c *HTTPClient) doJSON(ctx context.Context, method, path string, body interface{}, headers map[string]string) (*http.Response, error) {
+func (c *HTTPClient) doJSON(ctx context.Context, method, path string, body any) (*http.Response, error) {
 	var bodyReader io.Reader
 	if body != nil {
 		raw, err := json.Marshal(body)
@@ -423,9 +443,6 @@ func (c *HTTPClient) doJSON(ctx context.Context, method, path string, body inter
 	req.Header.Set("Accept", "application/json")
 	if c.username != "" {
 		req.SetBasicAuth(c.username, c.password)
-	}
-	for k, v := range headers {
-		req.Header.Set(k, v)
 	}
 	return c.httpClient.Do(req)
 }

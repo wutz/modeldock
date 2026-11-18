@@ -51,7 +51,8 @@ func main() {
 	flag.StringVar(&registryURL, "registry-url", "", "Harbor registry base URL")
 	flag.StringVar(&repository, "repository", "", "Harbor repository path (project/repo)")
 	flag.StringVar(&reference, "reference", "", "OCI manifest digest or tag")
-	flag.StringVar(&strategy, "strategy", string(modeldockv1alpha1.CacheStrategySharedFilesystem), "SharedFilesystem | NodeLocalNVMe")
+	flag.StringVar(&strategy, "strategy", string(modeldockv1alpha1.CacheStrategySharedFilesystem),
+		"SharedFilesystem | NodeLocalNVMe")
 	flag.StringVar(&cacheRoot, "cache-root", "/modeldock-cas", "CAS cache root directory")
 	flag.StringVar(&credentialsDir, "credentials-dir", "", "Directory containing username and password files")
 	flag.StringVar(&username, "username", os.Getenv("MODELDOCK_USERNAME"), "Harbor pull robot username")

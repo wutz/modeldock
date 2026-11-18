@@ -31,8 +31,8 @@ import (
 // BuildValidSafetensors creates a minimal valid .safetensors binary blob with tensor metadata.
 func BuildValidSafetensors(t *testing.T, tensorName string, dtype string, shape []int64, byteLen int) []byte {
 	t.Helper()
-	hdr := map[string]interface{}{
-		tensorName: map[string]interface{}{
+	hdr := map[string]any{
+		tensorName: map[string]any{
 			"dtype":        dtype,
 			"shape":        shape,
 			"data_offsets": []int{0, byteLen},
@@ -55,11 +55,14 @@ func TestInspectDirFullModelAndSecurity(t *testing.T) {
 	dir := t.TempDir()
 
 	// Write config.json & tokenizer_config.json
-	cfg := `{"architectures":["Qwen3ForCausalLM"],"torch_dtype":"bfloat16","max_position_embeddings":32768,"hidden_size":1024,"num_hidden_layers":4,"vocab_size":32000,"intermediate_size":2048}`
+	cfg := `{"architectures":["Qwen3ForCausalLM"],"torch_dtype":"bfloat16",` +
+		`"max_position_embeddings":32768,"hidden_size":1024,` +
+		`"num_hidden_layers":4,"vocab_size":32000,"intermediate_size":2048}`
 	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(cfg), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "tokenizer_config.json"), []byte(`{"chat_template":"{% for m in messages %}{{ m.content }}{% endfor %}"}`), 0o644); err != nil {
+	tokCfg := []byte(`{"chat_template":"{% for m in messages %}{{ m.content }}{% endfor %}"}`)
+	if err := os.WriteFile(filepath.Join(dir, "tokenizer_config.json"), tokCfg, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	// Training artifacts that must be filtered out automatically
@@ -75,7 +78,8 @@ func TestInspectDirFullModelAndSecurity(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "model-00001-of-00001.safetensors"), stBytes, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "model.safetensors.index.json"), []byte(`{"weight_map":{"model.embed_tokens.weight":"model-00001-of-00001.safetensors"}}`), 0o644); err != nil {
+	idxCfg := []byte(`{"weight_map":{"model.embed_tokens.weight":"model-00001-of-00001.safetensors"}}`)
+	if err := os.WriteFile(filepath.Join(dir, "model.safetensors.index.json"), idxCfg, 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -89,7 +93,8 @@ func TestInspectDirFullModelAndSecurity(t *testing.T) {
 	if len(res.WeightFiles) != 1 || res.WeightFiles[0].SafetensorsHeaderSize == 0 {
 		t.Fatalf("expected 1 safetensors shard with header size > 0, got %+v", res.WeightFiles)
 	}
-	if res.ServingProfile.Architecture != "Qwen3ForCausalLM" || res.ServingProfile.Precision != "BF16" || !res.ServingProfile.HasChatTemplate {
+	sp := res.ServingProfile
+	if sp.Architecture != "Qwen3ForCausalLM" || sp.Precision != "BF16" || !sp.HasChatTemplate {
 		t.Fatalf("unexpected ServingProfile: %+v", res.ServingProfile)
 	}
 	for _, cf := range res.ConfigFiles {
@@ -102,10 +107,19 @@ func TestInspectDirFullModelAndSecurity(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "pytorch_model.bin"), []byte("pickle-payload"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := modelmeta.InspectDir(dir, modeldockv1alpha1.ArtifactTypeFullWeight, modelmeta.InspectOptions{AllowUnsafeFormats: false}); err == nil {
+	_, err = modelmeta.InspectDir(
+		dir,
+		modeldockv1alpha1.ArtifactTypeFullWeight,
+		modelmeta.InspectOptions{AllowUnsafeFormats: false},
+	)
+	if err == nil {
 		t.Fatalf("expected InspectDir to reject unsafe .bin file when allowUnsafeFormats=false")
 	}
-	resAllow, err := modelmeta.InspectDir(dir, modeldockv1alpha1.ArtifactTypeFullWeight, modelmeta.InspectOptions{AllowUnsafeFormats: true})
+	resAllow, err := modelmeta.InspectDir(
+		dir,
+		modeldockv1alpha1.ArtifactTypeFullWeight,
+		modelmeta.InspectOptions{AllowUnsafeFormats: true},
+	)
 	if err != nil || !resAllow.UnsafeSerialization {
 		t.Fatalf("expected AllowUnsafeFormats=true to succeed and flag UnsafeSerialization, err=%v", err)
 	}
@@ -117,7 +131,8 @@ func TestInspectDirFullModelAndSecurity(t *testing.T) {
 	if err := os.Symlink(outsideFile, filepath.Join(dir, "escape.json")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := modelmeta.InspectDir(dir, modeldockv1alpha1.ArtifactTypeFullWeight, modelmeta.InspectOptions{}); err == nil {
+	_, err = modelmeta.InspectDir(dir, modeldockv1alpha1.ArtifactTypeFullWeight, modelmeta.InspectOptions{})
+	if err == nil {
 		t.Fatalf("expected InspectDir to block symlink escaping root")
 	}
 }

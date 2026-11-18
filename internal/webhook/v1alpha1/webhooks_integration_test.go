@@ -32,15 +32,20 @@ import (
 var _ = Describe("ModelDock Admission Webhooks", func() {
 	const digestA = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	const digestB = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	const publicNS = "modeldock-public"
+	const tenantANS = "tenant-a"
+	const tenantBNS = "tenant-b"
+	const loraRepo = "lora-a"
+	const loraPubName = "lora-pub-ok"
 
 	It("enforces visibility, defaults, immutability, and Production deletion protection via live kube-apiserver webhooks", func() {
-		for _, ns := range []string{"modeldock-public", "tenant-a", "tenant-b", "tenant-c"} {
+		for _, ns := range []string{publicNS, tenantANS, tenantBNS, "tenant-c"} {
 			Expect(k8sClient.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}})).To(Succeed())
 		}
 
 		By("1. ModelRepository projectOverride restricted to modeldock-public")
 		badRepo := &modeldockv1alpha1.ModelRepository{
-			ObjectMeta: metav1.ObjectMeta{Name: "bad-override", Namespace: "tenant-a"},
+			ObjectMeta: metav1.ObjectMeta{Name: "bad-override", Namespace: tenantANS},
 			Spec: modeldockv1alpha1.ModelRepositorySpec{
 				Harbor: modeldockv1alpha1.HarborRepositoryConfig{ProjectOverride: "models-public"},
 			},
@@ -48,7 +53,7 @@ var _ = Describe("ModelDock Admission Webhooks", func() {
 		Expect(k8sClient.Create(ctx, badRepo)).NotTo(Succeed())
 
 		pubRepo := &modeldockv1alpha1.ModelRepository{
-			ObjectMeta: metav1.ObjectMeta{Name: "qwen3-base", Namespace: "modeldock-public"},
+			ObjectMeta: metav1.ObjectMeta{Name: "qwen3-base", Namespace: publicNS},
 			Spec: modeldockv1alpha1.ModelRepositorySpec{
 				Visibility: modeldockv1alpha1.VisibilityPublic,
 				Harbor:     modeldockv1alpha1.HarborRepositoryConfig{ProjectOverride: "models-public"},
@@ -57,29 +62,29 @@ var _ = Describe("ModelDock Admission Webhooks", func() {
 		Expect(k8sClient.Create(ctx, pubRepo)).To(Succeed())
 
 		privRepoB := &modeldockv1alpha1.ModelRepository{
-			ObjectMeta: metav1.ObjectMeta{Name: "secret-b", Namespace: "tenant-b"},
+			ObjectMeta: metav1.ObjectMeta{Name: "secret-b", Namespace: tenantBNS},
 			Spec:       modeldockv1alpha1.ModelRepositorySpec{Visibility: modeldockv1alpha1.VisibilityPrivate},
 		}
 		Expect(k8sClient.Create(ctx, privRepoB)).To(Succeed())
 
 		sharedRepoB := &modeldockv1alpha1.ModelRepository{
-			ObjectMeta: metav1.ObjectMeta{Name: "shared-b", Namespace: "tenant-b"},
+			ObjectMeta: metav1.ObjectMeta{Name: "shared-b", Namespace: tenantBNS},
 			Spec: modeldockv1alpha1.ModelRepositorySpec{
 				Visibility:       modeldockv1alpha1.VisibilityWorkspaceShared,
-				SharedNamespaces: []string{"tenant-a"},
+				SharedNamespaces: []string{tenantANS},
 			},
 		}
 		Expect(k8sClient.Create(ctx, sharedRepoB)).To(Succeed())
 
 		repoA := &modeldockv1alpha1.ModelRepository{
-			ObjectMeta: metav1.ObjectMeta{Name: "lora-a", Namespace: "tenant-a"},
+			ObjectMeta: metav1.ObjectMeta{Name: loraRepo, Namespace: tenantANS},
 			Spec:       modeldockv1alpha1.ModelRepositorySpec{Visibility: modeldockv1alpha1.VisibilityPrivate},
 		}
 		Expect(k8sClient.Create(ctx, repoA)).To(Succeed())
 
 		By("2. Creating public & private base ModelArtifacts and verifying defaulting")
 		pubBase := &modeldockv1alpha1.ModelArtifact{
-			ObjectMeta: metav1.ObjectMeta{Name: "qwen3-32b", Namespace: "modeldock-public"},
+			ObjectMeta: metav1.ObjectMeta{Name: "qwen3-32b", Namespace: publicNS},
 			Spec: modeldockv1alpha1.ModelArtifactSpec{
 				RepositoryRef: "qwen3-base",
 				VersionTag:    "bf16",
@@ -91,7 +96,7 @@ var _ = Describe("ModelDock Admission Webhooks", func() {
 		Expect(pubBase.Spec.ArtifactType).To(Equal(modeldockv1alpha1.ArtifactTypeFullWeight))
 
 		privArtB := &modeldockv1alpha1.ModelArtifact{
-			ObjectMeta: metav1.ObjectMeta{Name: "priv-base-b", Namespace: "tenant-b"},
+			ObjectMeta: metav1.ObjectMeta{Name: "priv-base-b", Namespace: tenantBNS},
 			Spec: modeldockv1alpha1.ModelArtifactSpec{
 				RepositoryRef: "secret-b",
 				VersionTag:    "v1",
@@ -101,7 +106,7 @@ var _ = Describe("ModelDock Admission Webhooks", func() {
 		Expect(k8sClient.Create(ctx, privArtB)).To(Succeed())
 
 		sharedArtB := &modeldockv1alpha1.ModelArtifact{
-			ObjectMeta: metav1.ObjectMeta{Name: "shared-base-b", Namespace: "tenant-b"},
+			ObjectMeta: metav1.ObjectMeta{Name: "shared-base-b", Namespace: tenantBNS},
 			Spec: modeldockv1alpha1.ModelArtifactSpec{
 				RepositoryRef: "shared-b",
 				VersionTag:    "v1",
@@ -112,9 +117,9 @@ var _ = Describe("ModelDock Admission Webhooks", func() {
 
 		By("3. Enforcing LoRA baseModelRef requirement and cross-namespace Anti-Confused-Deputy rules")
 		loraNoBase := &modeldockv1alpha1.ModelArtifact{
-			ObjectMeta: metav1.ObjectMeta{Name: "lora-missing-base", Namespace: "tenant-a"},
+			ObjectMeta: metav1.ObjectMeta{Name: "lora-missing-base", Namespace: tenantANS},
 			Spec: modeldockv1alpha1.ModelArtifactSpec{
-				RepositoryRef: "lora-a",
+				RepositoryRef: loraRepo,
 				VersionTag:    "v1",
 				OCIDigest:     digestA,
 				ArtifactType:  modeldockv1alpha1.ArtifactTypeLoRAAdapter,
@@ -124,14 +129,14 @@ var _ = Describe("ModelDock Admission Webhooks", func() {
 
 		// Tenant A referencing Tenant B's Private model -> MUST DENY
 		loraSteal := &modeldockv1alpha1.ModelArtifact{
-			ObjectMeta: metav1.ObjectMeta{Name: "lora-steal", Namespace: "tenant-a"},
+			ObjectMeta: metav1.ObjectMeta{Name: "lora-steal", Namespace: tenantANS},
 			Spec: modeldockv1alpha1.ModelArtifactSpec{
-				RepositoryRef: "lora-a",
+				RepositoryRef: loraRepo,
 				VersionTag:    "v1",
 				OCIDigest:     digestA,
 				ArtifactType:  modeldockv1alpha1.ArtifactTypeLoRAAdapter,
 				BaseModelRef: &modeldockv1alpha1.ModelArtifactReference{
-					Namespace: "tenant-b",
+					Namespace: tenantBNS,
 					Name:      "priv-base-b",
 				},
 			},
@@ -142,14 +147,14 @@ var _ = Describe("ModelDock Admission Webhooks", func() {
 
 		// Tenant A referencing Tenant B's WorkspaceShared model (whitelisted) -> ALLOW
 		loraSharedOK := &modeldockv1alpha1.ModelArtifact{
-			ObjectMeta: metav1.ObjectMeta{Name: "lora-shared-ok", Namespace: "tenant-a"},
+			ObjectMeta: metav1.ObjectMeta{Name: "lora-shared-ok", Namespace: tenantANS},
 			Spec: modeldockv1alpha1.ModelArtifactSpec{
-				RepositoryRef: "lora-a",
+				RepositoryRef: loraRepo,
 				VersionTag:    "v1",
 				OCIDigest:     digestA,
 				ArtifactType:  modeldockv1alpha1.ArtifactTypeLoRAAdapter,
 				BaseModelRef: &modeldockv1alpha1.ModelArtifactReference{
-					Namespace: "tenant-b",
+					Namespace: tenantBNS,
 					Name:      "shared-base-b",
 				},
 			},
@@ -158,15 +163,15 @@ var _ = Describe("ModelDock Admission Webhooks", func() {
 
 		// Tenant A referencing Public model -> ALLOW
 		loraPubOK := &modeldockv1alpha1.ModelArtifact{
-			ObjectMeta: metav1.ObjectMeta{Name: "lora-pub-ok", Namespace: "tenant-a"},
+			ObjectMeta: metav1.ObjectMeta{Name: loraPubName, Namespace: tenantANS},
 			Spec: modeldockv1alpha1.ModelArtifactSpec{
-				RepositoryRef: "lora-a",
+				RepositoryRef: loraRepo,
 				VersionTag:    "v2",
 				OCIDigest:     digestA,
 				ArtifactType:  modeldockv1alpha1.ArtifactTypeLoRAAdapter,
 				Stage:         modeldockv1alpha1.StageProduction,
 				BaseModelRef: &modeldockv1alpha1.ModelArtifactReference{
-					Namespace: "modeldock-public",
+					Namespace: publicNS,
 					Name:      "qwen3-32b",
 					OCIDigest: digestA,
 				},
@@ -179,15 +184,15 @@ var _ = Describe("ModelDock Admission Webhooks", func() {
 		Expect(k8sClient.Status().Update(ctx, loraPubOK)).To(Succeed())
 
 		var cur modeldockv1alpha1.ModelArtifact
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: "tenant-a", Name: "lora-pub-ok"}, &cur)).To(Succeed())
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: tenantANS, Name: loraPubName}, &cur)).To(Succeed())
 		cur.Spec.OCIDigest = digestB
 		Expect(k8sClient.Update(ctx, &cur)).NotTo(Succeed())
 
 		// Create active ModelCache with activeConsumers=2 -> deletion must be blocked!
 		mc := &modeldockv1alpha1.ModelCache{
-			ObjectMeta: metav1.ObjectMeta{Name: "mc-lora-pub", Namespace: "tenant-a"},
+			ObjectMeta: metav1.ObjectMeta{Name: "mc-lora-pub", Namespace: tenantANS},
 			Spec: modeldockv1alpha1.ModelCacheSpec{
-				ArtifactRef: modeldockv1alpha1.ModelArtifactReference{Name: "lora-pub-ok"},
+				ArtifactRef: modeldockv1alpha1.ModelArtifactReference{Name: loraPubName},
 			},
 		}
 		Expect(k8sClient.Create(ctx, mc)).To(Succeed())
@@ -199,25 +204,25 @@ var _ = Describe("ModelDock Admission Webhooks", func() {
 		// After draining consumers & demoting to Deprecated, deletion succeeds.
 		mc.Status.ActiveConsumers = 0
 		Expect(k8sClient.Status().Update(ctx, mc)).To(Succeed())
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: "tenant-a", Name: "lora-pub-ok"}, &cur)).To(Succeed())
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: tenantANS, Name: loraPubName}, &cur)).To(Succeed())
 		cur.Spec.Stage = modeldockv1alpha1.StageDeprecated
 		Expect(k8sClient.Update(ctx, &cur)).To(Succeed())
 		Expect(k8sClient.Delete(ctx, &cur)).To(Succeed())
 
 		By("5. Validating ModelExport defaulting & single-source rules")
 		badExport := &modeldockv1alpha1.ModelExport{
-			ObjectMeta: metav1.ObjectMeta{Name: "bad-exp", Namespace: "tenant-a"},
+			ObjectMeta: metav1.ObjectMeta{Name: "bad-exp", Namespace: tenantANS},
 			Spec: modeldockv1alpha1.ModelExportSpec{
-				TargetRepository: "lora-a",
+				TargetRepository: loraRepo,
 				VersionTag:       "v1",
 			},
 		}
 		Expect(k8sClient.Create(ctx, badExport)).NotTo(Succeed())
 
 		goodExport := &modeldockv1alpha1.ModelExport{
-			ObjectMeta: metav1.ObjectMeta{Name: "good-exp", Namespace: "tenant-a"},
+			ObjectMeta: metav1.ObjectMeta{Name: "good-exp", Namespace: tenantANS},
 			Spec: modeldockv1alpha1.ModelExportSpec{
-				TargetRepository: "lora-a",
+				TargetRepository: loraRepo,
 				VersionTag:       "v1",
 				Source: modeldockv1alpha1.ExportSource{
 					ExternalHubSource: &modeldockv1alpha1.ExternalHubSource{

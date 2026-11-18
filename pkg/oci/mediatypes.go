@@ -82,7 +82,8 @@ type Manifest struct {
 	Annotations   map[string]string `json:"annotations,omitempty"`
 }
 
-// ModelPackConfig is stored as the OCI Config Blob so remote clusters can reconstruct ModelArtifact CRs without a shared DB.
+// ModelPackConfig is stored as the OCI Config Blob so remote clusters can reconstruct ModelArtifact CRs
+// without a shared DB.
 type ModelPackConfig struct {
 	SchemaVersion       string                                    `json:"schemaVersion"`
 	CreatedAt           time.Time                                 `json:"createdAt"`

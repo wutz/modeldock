@@ -21,7 +21,6 @@ import (
 	"fmt"
 
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -57,7 +56,7 @@ func (d *ModelExportDefaulter) Default(_ context.Context, obj *modeldockv1alpha1
 		obj.Spec.Concurrency = 4
 	}
 	if obj.Spec.TTLSecondsAfterFinished == nil {
-		obj.Spec.TTLSecondsAfterFinished = ptr.To(int32(86400))
+		obj.Spec.TTLSecondsAfterFinished = new(int32(86400))
 	}
 	return nil
 }

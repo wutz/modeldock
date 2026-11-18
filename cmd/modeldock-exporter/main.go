@@ -80,7 +80,8 @@ func main() {
 	flag.BoolVar(&allowUnsafeFormats, "allow-unsafe-formats", false, "Allow pickle .bin/.pt weights")
 	flag.BoolVar(&includeTrainingStates, "include-training-states", false, "Include optimizer/rng checkpoint files")
 	flag.IntVar(&concurrency, "concurrency", 4, "Worker concurrency")
-	flag.Int64Var(&chunkSizeBytes, "chunk-size-bytes", 0, "Split weight files larger than this byte threshold (0=disabled)")
+	flag.Int64Var(&chunkSizeBytes, "chunk-size-bytes", 0,
+		"Split weight files larger than this byte threshold (0=disabled)")
 	flag.StringVar(&baseModelJSON, "base-model-json", "", "JSON-encoded ModelArtifactReference")
 	flag.StringVar(&lineageJSON, "lineage-json", "", "JSON-encoded LineageSpec")
 	flag.StringVar(&outputFile, "output-file", "", "Optional path (e.g. /dev/termination-log) to write ExportResult JSON")

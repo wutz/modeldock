@@ -214,7 +214,13 @@ func Pull(ctx context.Context, opts PullOptions) (*PullResult, error) {
 	}, nil
 }
 
-func pullSharedFilesystem(ctx context.Context, opts PullOptions, manifest *oci.Manifest, stagingDir string, downloaded *atomic.Int64) error {
+func pullSharedFilesystem(
+	ctx context.Context,
+	opts PullOptions,
+	manifest *oci.Manifest,
+	stagingDir string,
+	downloaded *atomic.Int64,
+) error {
 	// Pre-create target files for chunked layers so concurrent workers can WriteAt cleanly.
 	chunkedFiles := map[string]struct {
 		totalSize  int64
@@ -341,7 +347,14 @@ func pullSharedFilesystem(ctx context.Context, opts PullOptions, manifest *oci.M
 	return nil
 }
 
-func pullNodeLocalNVMe(ctx context.Context, opts PullOptions, manifest *oci.Manifest, stagingDir string, downloaded *atomic.Int64, linkCount *atomic.Int32) error {
+func pullNodeLocalNVMe(
+	ctx context.Context,
+	opts PullOptions,
+	manifest *oci.Manifest,
+	stagingDir string,
+	downloaded *atomic.Int64,
+	linkCount *atomic.Int32,
+) error {
 	blobsDir := filepath.Join(opts.CacheRoot, "blobs", "sha256")
 	if err := os.MkdirAll(blobsDir, 0o755); err != nil {
 		return err
@@ -421,7 +434,12 @@ func pullNodeLocalNVMe(ctx context.Context, opts PullOptions, manifest *oci.Mani
 }
 
 // EvictUnused removes cached manifest directories older than maxAge that are not in keepDigests.
-func EvictUnused(cacheRoot string, strategy modeldockv1alpha1.CacheStrategy, keepDigests map[string]struct{}, maxAge time.Duration) (int, error) {
+func EvictUnused(
+	cacheRoot string,
+	strategy modeldockv1alpha1.CacheStrategy,
+	keepDigests map[string]struct{},
+	maxAge time.Duration,
+) (int, error) {
 	base := filepath.Join(cacheRoot, "sha256")
 	if strategy == modeldockv1alpha1.CacheStrategyNodeLocalNVMe {
 		base = filepath.Join(cacheRoot, "manifests", "sha256")
