@@ -1,0 +1,268 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.22.0
+  name: modelcaches.modeldock.wutz.dev
+spec:
+  group: modeldock.wutz.dev
+  names:
+    kind: ModelCache
+    listKind: ModelCacheList
+    plural: modelcaches
+    shortNames:
+    - mcache
+    singular: modelcache
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.strategy
+      name: Strategy
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.activeConsumers
+      name: Consumers
+      type: integer
+    - jsonPath: .status.warmupDurationSeconds
+      name: Duration(s)
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: ModelCache is the Schema for the modelcaches API.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: ModelCacheSpec defines the desired state of ModelCache.
+            properties:
+              artifactRef:
+                description: ArtifactRef identifies the target ModelArtifact to warm
+                  up.
+                properties:
+                  name:
+                    description: Name of the referenced ModelArtifact.
+                    minLength: 1
+                    type: string
+                  namespace:
+                    description: Namespace of the referenced ModelArtifact. Defaults
+                      to the referencing object's namespace if empty.
+                    type: string
+                  ociDigest:
+                    description: OCIDigest optionally pins the exact immutable manifest
+                      digest of the referenced artifact.
+                    type: string
+                required:
+                - name
+                type: object
+              enableP2P:
+                default: true
+                description: EnableP2P routes Harbor blob pulls through Dragonfly
+                  P2P HTTP proxy when configured.
+                type: boolean
+              nodeLocalNVMe:
+                description: NodeLocalNVMe configures node-local NVMe hardlink caching.
+                properties:
+                  hostCacheRoot:
+                    default: /var/lib/modeldock/cas
+                    description: HostCacheRoot sets the host directory root for CAS
+                      blobs and hardlink manifest views.
+                    type: string
+                  nodeSelector:
+                    additionalProperties:
+                      type: string
+                    description: NodeSelector filters target GPU nodes for cache warmup.
+                    type: object
+                type: object
+              sharedFilesystem:
+                description: SharedFilesystem configures shared CAS volume caching.
+                properties:
+                  cachePoolName:
+                    default: default-rwx-model-pool
+                    description: CachePoolName names the platform RWX storage pool
+                      (e.g. default-rwx-model-pool).
+                    type: string
+                  pvcName:
+                    description: PVCName explicitly specifies the RWX PVC storing
+                      the CAS directory (defaults to pool mapping).
+                    type: string
+                type: object
+              strategy:
+                default: SharedFilesystem
+                description: Strategy selects SharedFilesystem, NodeLocalNVMe, or
+                  ImageVolume.
+                enum:
+                - SharedFilesystem
+                - NodeLocalNVMe
+                - ImageVolume
+                type: string
+              ttlHoursAfterUnused:
+                default: 168
+                description: TTLHoursAfterUnused permits LRU eviction after activeConsumers
+                  stays 0 for this duration.
+                format: int32
+                minimum: 0
+                type: integer
+            required:
+            - artifactRef
+            type: object
+          status:
+            description: ModelCacheStatus defines the observed state of ModelCache.
+            properties:
+              activeConsumers:
+                description: ActiveConsumers counts running pods actively referencing
+                  this cache.
+                format: int32
+                type: integer
+              cachedNodesCount:
+                description: CachedNodesCount records how many nodes have warmed the
+                  cache in NodeLocalNVMe mode.
+                format: int32
+                type: integer
+              conditions:
+                description: Conditions represent the current state of the ModelCache
+                  resource.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              evictedAt:
+                description: EvictedAt records when unused cache content was evicted.
+                format: date-time
+                type: string
+              lastUsedTime:
+                description: LastUsedTime records the last timestamp when ActiveConsumers
+                  > 0 or warmup completed.
+                format: date-time
+                type: string
+              message:
+                description: Message gives progress or failure context.
+                type: string
+              mountSpec:
+                description: MountSpec exposes ready-to-use mount coordinates for
+                  InferPilot / TrainPilot.
+                properties:
+                  claimName:
+                    description: ClaimName is set when Mode is ReadOnlyManyPVC.
+                    type: string
+                  hostPath:
+                    description: HostPath is set when Mode is NodeLocalHostPath.
+                    type: string
+                  mode:
+                    description: Mode specifies ReadOnlyManyPVC, NodeLocalHostPath,
+                      or OCIImageVolume.
+                    enum:
+                    - ReadOnlyManyPVC
+                    - NodeLocalHostPath
+                    - OCIImageVolume
+                    type: string
+                  ociReference:
+                    description: OCIReference is set when Mode is OCIImageVolume.
+                    type: string
+                  subPath:
+                    description: SubPath is the digest-addressed directory path inside
+                      the PVC (sha256/<hex>).
+                    type: string
+                required:
+                - mode
+                type: object
+              phase:
+                description: Phase tracks warmup and lifecycle state.
+                enum:
+                - Pending
+                - WarmingUp
+                - Ready
+                - Evicted
+                - Failed
+                type: string
+              resolvedDigest:
+                description: ResolvedDigest records the immutable OCI manifest digest
+                  materialized in cache.
+                type: string
+              warmupDurationSeconds:
+                description: WarmupDurationSeconds records total warmup duration.
+                format: int64
+                type: integer
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

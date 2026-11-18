@@ -1,0 +1,23 @@
+# Build modeldock-puller binary
+ARG BASE_IMAGE=golang:1.26
+FROM ${BASE_IMAGE} AS builder
+ARG TARGETOS
+ARG TARGETARCH
+
+WORKDIR /workspace
+COPY go.mod go.mod
+COPY go.sum go.sum
+RUN go mod download
+
+COPY api/ api/
+COPY pkg/ pkg/
+COPY cmd/modeldock-puller/ cmd/modeldock-puller/
+
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o modeldock-puller ./cmd/modeldock-puller/main.go
+
+FROM gcr.io/distroless/static:nonroot
+WORKDIR /
+COPY --from=builder /workspace/modeldock-puller .
+USER 65532:65532
+
+ENTRYPOINT ["/modeldock-puller"]

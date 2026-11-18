@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ModelDock Catalog</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card: #1e293b;
+      --border: #334155;
+      --text: #f8fafc;
+      --muted: #94a3b8;
+      --accent: #38bdf8;
+      --green: #22c55e;
+      --amber: #f59e0b;
+    }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      padding: 24px;
+    }
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 24px;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 16px;
+    }
+    h1 { margin: 0; font-size: 1.5rem; }
+    .subtitle { color: var(--muted); font-size: 0.9rem; margin-top: 4px; }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+    .stat {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 16px;
+    }
+    .stat .label { color: var(--muted); font-size: 0.85rem; }
+    .stat .val { font-size: 1.8rem; font-weight: 700; color: var(--accent); margin-top: 6px; }
+    section {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 16px;
+      margin-bottom: 20px;
+      overflow-x: auto;
+    }
+    h2 { margin-top: 0; font-size: 1.1rem; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+    th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); }
+    th { color: var(--muted); font-weight: 600; }
+    .badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 0.75rem;
+      background: #0ea5e933;
+      color: var(--accent);
+    }
+    .badge.prod, .badge.Ready { background: #22c55e33; color: var(--green); }
+    .badge.warn { background: #f59e0b33; color: var(--amber); }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.82rem; }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>ModelDock Registry &amp; Cache Catalog</h1>
+      <div class="subtitle">Read-only RBAC-enforced view over Harbor OCI ModelPack CRDs</div>
+    </div>
+    <button onclick="loadCatalog()" style="background:#0284c7;color:#fff;border:none;padding:8px 14px;border-radius:6px;cursor:pointer;">Refresh</button>
+  </header>
+
+  <div class="grid">
+    <div class="stat"><div class="label">Repositories</div><div class="val" id="cnt-repos">-</div></div>
+    <div class="stat"><div class="label">Artifacts</div><div class="val" id="cnt-arts">-</div></div>
+    <div class="stat"><div class="label">Ready Caches</div><div class="val" id="cnt-caches">-</div></div>
+  </div>
+
+  <section>
+    <h2>ModelArtifacts</h2>
+    <table>
+      <thead>
+        <tr><th>Namespace / Name</th><th>Repository</th><th>Stage</th><th>Type</th><th>Architecture / Precision</th><th>Digest</th><th>Phase</th></tr>
+      </thead>
+      <tbody id="tbl-artifacts"></tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>ModelCaches (CAS Pools)</h2>
+    <table>
+      <thead>
+        <tr><th>Namespace / Name</th><th>Artifact</th><th>Strategy</th><th>Mount Coordinate</th><th>Consumers</th><th>Phase</th></tr>
+      </thead>
+      <tbody id="tbl-caches"></tbody>
+    </table>
+  </section>
+
+  <script>
+    async function loadCatalog() {
+      const resp = await fetch('/api/v1/catalog');
+      if (!resp.ok) return;
+      const data = await resp.json();
+      document.getElementById('cnt-repos').textContent = (data.repositories || []).length;
+      document.getElementById('cnt-arts').textContent = (data.artifacts || []).length;
+      document.getElementById('cnt-caches').textContent = (data.caches || []).filter(c => c.status && c.status.phase === 'Ready').length;
+
+      const artBody = document.getElementById('tbl-artifacts');
+      artBody.innerHTML = (data.artifacts || []).map(a => {
+        const sp = a.spec.servingProfile || {};
+        const st = a.status || {};
+        const stageCls = a.spec.stage === 'Production' ? 'prod' : '';
+        return `<tr>
+          <td><strong>${a.metadata.namespace}/${a.metadata.name}</strong></td>
+          <td>${a.spec.repositoryRef}:${a.spec.versionTag}</td>
+          <td><span class="badge ${stageCls}">${a.spec.stage || 'Staging'}</span></td>
+          <td>${a.spec.artifactType || 'FullWeight'}</td>
+          <td>${sp.architecture || '-'} / ${sp.precision || '-'} (${sp.parameterSize || '-'})</td>
+          <td><code>${(a.spec.ociDigest || '').slice(0, 19)}...</code></td>
+          <td><span class="badge ${st.phase || ''}">${st.phase || 'Pending'}</span></td>
+        </tr>`;
+      }).join('');
+
+      const cacheBody = document.getElementById('tbl-caches');
+      cacheBody.innerHTML = (data.caches || []).map(c => {
+        const st = c.status || {};
+        const ms = st.mountSpec || {};
+        const coord = ms.subPath ? `${ms.claimName}:${ms.subPath}` : (ms.hostPath || ms.ociReference || '-');
+        return `<tr>
+          <td><strong>${c.metadata.namespace}/${c.metadata.name}</strong></td>
+          <td>${c.spec.artifactRef.name}</td>
+          <td>${c.spec.strategy}</td>
+          <td><code>${coord}</code></td>
+          <td>${st.activeConsumers || 0}</td>
+          <td><span class="badge ${st.phase || ''}">${st.phase || 'Pending'}</span></td>
+        </tr>`;
+      }).join('');
+    }
+    loadCatalog();
+  </script>
+</body>
+</html>

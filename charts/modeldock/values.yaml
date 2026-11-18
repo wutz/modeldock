@@ -1,0 +1,58 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/wutz/modeldock
+  tag: latest
+  pullPolicy: IfNotPresent
+
+exporter:
+  image: ghcr.io/wutz/modeldock-exporter:latest
+
+puller:
+  image: ghcr.io/wutz/modeldock-puller:latest
+
+harbor:
+  secretName: default-harbor
+  createSecret: false
+  endpoint: https://harbor.example.com
+  registryHost: harbor.example.com
+  username: admin
+  password: ""
+  insecureSkipTLS: false
+
+casStorage:
+  createPVC: false
+  pvcName: modeldock-cas-shared
+  storageClassName: ""
+  accessModes:
+    - ReadWriteMany
+  size: 2Ti
+
+dragonfly:
+  proxyURL: ""
+
+harborWebhook:
+  enabled: true
+  port: 8090
+  secret: ""
+
+ui:
+  enabled: true
+  port: 8091
+  requireBearerToken: true
+
+webhooks:
+  # Set to true after provisioning TLS certs for /tmp/k8s-webhook-server/serving-certs (or deploy via config/default + cert-manager)
+  enabled: false
+  port: 9443
+
+leaderElection:
+  enabled: true
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi

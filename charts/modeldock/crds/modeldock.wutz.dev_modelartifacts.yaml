@@ -1,0 +1,390 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.22.0
+  name: modelartifacts.modeldock.wutz.dev
+spec:
+  group: modeldock.wutz.dev
+  names:
+    kind: ModelArtifact
+    listKind: ModelArtifactList
+    plural: modelartifacts
+    shortNames:
+    - mart
+    singular: modelartifact
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.stage
+      name: Stage
+      type: string
+    - jsonPath: .spec.artifactType
+      name: Type
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.totalSizeBytes
+      name: Size
+      type: integer
+    - jsonPath: .spec.ociDigest
+      name: Digest
+      priority: 1
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: ModelArtifact is the Schema for the modelartifacts API.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: ModelArtifactSpec defines the desired state of ModelArtifact.
+            properties:
+              artifactType:
+                default: FullWeight
+                description: ArtifactType classifies this model artifact.
+                enum:
+                - FullWeight
+                - LoRAAdapter
+                - DraftModel
+                type: string
+              baseModelRef:
+                description: BaseModelRef is required when ArtifactType is LoRAAdapter
+                  or DraftModel.
+                properties:
+                  name:
+                    description: Name of the referenced ModelArtifact.
+                    minLength: 1
+                    type: string
+                  namespace:
+                    description: Namespace of the referenced ModelArtifact. Defaults
+                      to the referencing object's namespace if empty.
+                    type: string
+                  ociDigest:
+                    description: OCIDigest optionally pins the exact immutable manifest
+                      digest of the referenced artifact.
+                    type: string
+                required:
+                - name
+                type: object
+              lineage:
+                description: Lineage tracks training provenance, parent artifacts,
+                  and evaluation records.
+                properties:
+                  evaluations:
+                    description: Evaluations stores benchmark evaluation scores used
+                      for promotion gates.
+                    items:
+                      description: EvaluationRecord captures benchmark evaluation
+                        results attached to an artifact.
+                      properties:
+                        benchmark:
+                          type: string
+                        evaluatedAt:
+                          format: date-time
+                          type: string
+                        reportURI:
+                          type: string
+                        score:
+                          type: string
+                      required:
+                      - benchmark
+                      - score
+                      type: object
+                    type: array
+                  externalRevision:
+                    description: ExternalRevision captures the resolved upstream commit
+                      SHA or external OCI reference.
+                    type: string
+                  parentArtifactRef:
+                    description: ParentArtifactRef links to the parent model artifact
+                      (e.g. SFT checkpoint or base model).
+                    properties:
+                      name:
+                        description: Name of the referenced ModelArtifact.
+                        minLength: 1
+                        type: string
+                      namespace:
+                        description: Namespace of the referenced ModelArtifact. Defaults
+                          to the referencing object's namespace if empty.
+                        type: string
+                      ociDigest:
+                        description: OCIDigest optionally pins the exact immutable
+                          manifest digest of the referenced artifact.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  sourceType:
+                    description: SourceType identifies how this model was produced.
+                    enum:
+                    - TrainTask
+                    - DevBox
+                    - HuggingFace
+                    - ModelScope
+                    - Quantization
+                    - ExternalOCI
+                    type: string
+                  trainTaskRef:
+                    description: TrainTaskRef links to the originating TrainPilot
+                      task.
+                    properties:
+                      globalStep:
+                        format: int64
+                        type: integer
+                      name:
+                        type: string
+                      namespace:
+                        type: string
+                      runID:
+                        type: string
+                      taskID:
+                        type: string
+                    type: object
+                type: object
+              loraSpec:
+                description: LoRASpec contains adapter parameters extracted from adapter_config.json.
+                properties:
+                  alpha:
+                    description: Alpha is the LoRA scaling factor.
+                    format: int32
+                    type: integer
+                  rank:
+                    description: Rank is the LoRA decomposition rank r.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  targetModules:
+                    description: TargetModules lists module suffixes adapted by LoRA.
+                    items:
+                      type: string
+                    type: array
+                required:
+                - rank
+                type: object
+              ociDigest:
+                description: OCIDigest locks the immutable sha256 manifest digest
+                  (e.g. sha256:...).
+                pattern: ^sha256:[a-f0-9]{64}$
+                type: string
+              repositoryRef:
+                description: RepositoryRef references the parent ModelRepository in
+                  the same namespace.
+                minLength: 1
+                type: string
+              servingProfile:
+                description: ServingProfile defines runtime inference specifications.
+                properties:
+                  architecture:
+                    description: Architecture is the model architecture class (e.g.
+                      Qwen3ForCausalLM).
+                    type: string
+                  hasChatTemplate:
+                    description: HasChatTemplate indicates whether tokenizer_config.json
+                      or chat_template.jinja is present.
+                    type: boolean
+                  maxPositionEmbeddings:
+                    description: MaxPositionEmbeddings records maximum context window
+                      length from config.json.
+                    format: int32
+                    type: integer
+                  minVRAMGiB:
+                    description: MinVRAMGiB estimates minimum GPU memory required
+                      to load the weights.
+                    format: int32
+                    type: integer
+                  parameterSize:
+                    description: ParameterSize is a human-readable parameter count
+                      (e.g. "32B", "671B").
+                    type: string
+                  precision:
+                    description: Precision denotes numerical dtype or quantization
+                      format.
+                    enum:
+                    - FP32
+                    - BF16
+                    - FP16
+                    - FP8
+                    - INT8
+                    - INT4-AWQ
+                    - INT4-GPTQ
+                    - Unknown
+                    type: string
+                  recommendedEngine:
+                    description: RecommendedEngine names the preferred inference engine
+                      (vllm | sglang | triton).
+                    enum:
+                    - vllm
+                    - sglang
+                    - triton
+                    type: string
+                  recommendedExtraArgs:
+                    description: RecommendedExtraArgs holds extra CLI flags passed
+                      to the inference engine.
+                    items:
+                      type: string
+                    type: array
+                  recommendedTensorParallel:
+                    description: RecommendedTensorParallel specifies recommended tensor
+                      parallel degree.
+                    format: int32
+                    type: integer
+                  requiresTrustRemoteCode:
+                    description: RequiresTrustRemoteCode indicates whether custom
+                      Python modeling code is needed.
+                    type: boolean
+                  serializationFormat:
+                    description: SerializationFormat denotes weight serialization
+                      format.
+                    enum:
+                    - safetensors
+                    - gguf
+                    - pytorch-bin
+                    - unknown
+                    type: string
+                type: object
+              stage:
+                default: Staging
+                description: Stage controls the lifecycle promotion state machine.
+                enum:
+                - Staging
+                - Verified
+                - Production
+                - Deprecated
+                - Archived
+                type: string
+              versionTag:
+                description: VersionTag is the semantic or release tag mapped in Harbor.
+                minLength: 1
+                type: string
+            required:
+            - ociDigest
+            - repositoryRef
+            - versionTag
+            type: object
+          status:
+            description: ModelArtifactStatus defines the observed state of ModelArtifact.
+            properties:
+              activeCacheRef:
+                description: ActiveCacheRef points to an active ready ModelCache in
+                  the same namespace.
+                type: string
+              conditions:
+                description: Conditions represent the current state of the ModelArtifact
+                  resource.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              ociReference:
+                description: OCIReference is the canonical digest-pinned OCI reference.
+                type: string
+              phase:
+                description: Phase summarizes artifact verification status.
+                enum:
+                - Syncing
+                - Ready
+                - Invalid
+                - Archived
+                type: string
+              promotedToProductionAt:
+                description: PromotedToProductionAt records when the artifact first
+                  entered Production stage.
+                format: date-time
+                type: string
+              shardCount:
+                description: ShardCount is the number of weight shards in the artifact.
+                format: int32
+                type: integer
+              totalSizeBytes:
+                description: TotalSizeBytes is the total byte size of all OCI layers
+                  in the manifest.
+                format: int64
+                type: integer
+              unsafeSerialization:
+                description: UnsafeSerialization is true if the artifact contains
+                  pickle-based formats (.bin/.pt).
+                type: boolean
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
