@@ -1,0 +1,18 @@
+{{- if .Values.casStorage.createPVC }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Values.casStorage.pvcName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "modeldock.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    {{- toYaml .Values.casStorage.accessModes | nindent 4 }}
+  {{- if .Values.casStorage.storageClassName }}
+  storageClassName: {{ .Values.casStorage.storageClassName | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.casStorage.size | quote }}
+{{- end }}

@@ -1,0 +1,75 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: manager-role
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - namespaces
+  - secrets
+  verbs:
+  - create
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - nodes
+  - persistentvolumeclaims
+  - pods
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - batch
+  resources:
+  - jobs
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - modeldock.wutz.dev
+  resources:
+  - modelartifacts
+  - modelcaches
+  - modelexports
+  - modelrepositories
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - modeldock.wutz.dev
+  resources:
+  - modelartifacts/finalizers
+  - modelcaches/finalizers
+  - modelexports/finalizers
+  - modelrepositories/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - modeldock.wutz.dev
+  resources:
+  - modelartifacts/status
+  - modelcaches/status
+  - modelexports/status
+  - modelrepositories/status
+  verbs:
+  - get
+  - patch
+  - update

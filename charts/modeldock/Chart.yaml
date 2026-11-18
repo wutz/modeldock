@@ -1,0 +1,15 @@
+apiVersion: v2
+name: modeldock
+description: Kubernetes Model Registry & OCI ModelPack Delivery Operator powered by Harbor
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/wutz/modeldock
+keywords:
+  - kubernetes
+  - operator
+  - harbor
+  - oci
+  - modelpack
+  - llm
+  - inference

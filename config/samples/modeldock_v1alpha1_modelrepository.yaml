@@ -1,0 +1,9 @@
+apiVersion: modeldock.wutz.dev/v1alpha1
+kind: ModelRepository
+metadata:
+  labels:
+    app.kubernetes.io/name: modeldock
+    app.kubernetes.io/managed-by: kustomize
+  name: modelrepository-sample
+spec:
+  # TODO(user): Add fields here

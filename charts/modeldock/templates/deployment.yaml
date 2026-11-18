@@ -1,0 +1,92 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "modeldock.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "modeldock.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "modeldock.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "modeldock.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "modeldock.fullname" . }}
+      securityContext:
+        runAsNonRoot: true
+      containers:
+        - name: manager
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --system-namespace={{ .Release.Namespace }}
+            - --exporter-image={{ .Values.exporter.image }}
+            - --puller-image={{ .Values.puller.image }}
+            - --default-cas-pvc={{ .Values.casStorage.pvcName }}
+            - --health-probe-bind-address=:8081
+            {{- if .Values.leaderElection.enabled }}
+            - --leader-elect
+            {{- end }}
+            {{- if .Values.dragonfly.proxyURL }}
+            - --dragonfly-proxy-url={{ .Values.dragonfly.proxyURL }}
+            {{- end }}
+            {{- if .Values.harborWebhook.enabled }}
+            - --harbor-webhook-bind-address=:{{ .Values.harborWebhook.port }}
+            {{- else }}
+            - --harbor-webhook-bind-address=0
+            {{- end }}
+            {{- if .Values.ui.enabled }}
+            - --ui-bind-address=:{{ .Values.ui.port }}
+            - --ui-require-bearer-token={{ .Values.ui.requireBearerToken }}
+            {{- else }}
+            - --ui-bind-address=0
+            {{- end }}
+            {{- if .Values.webhooks.enabled }}
+            - --webhook-port={{ .Values.webhooks.port }}
+            {{- else }}
+            - --webhook-port=-1
+            {{- end }}
+          env:
+            - name: ENABLE_WEBHOOKS
+              value: {{ .Values.webhooks.enabled | quote }}
+            {{- if .Values.harborWebhook.secret }}
+            - name: MODELDOCK_HARBOR_WEBHOOK_SECRET
+              value: {{ .Values.harborWebhook.secret | quote }}
+            {{- end }}
+          ports:
+            - name: health
+              containerPort: 8081
+            {{- if .Values.harborWebhook.enabled }}
+            - name: harbor-webhook
+              containerPort: {{ .Values.harborWebhook.port }}
+            {{- end }}
+            {{- if .Values.ui.enabled }}
+            - name: catalog-ui
+              containerPort: {{ .Values.ui.port }}
+            {{- end }}
+            {{- if .Values.webhooks.enabled }}
+            - name: webhook
+              containerPort: {{ .Values.webhooks.port }}
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}

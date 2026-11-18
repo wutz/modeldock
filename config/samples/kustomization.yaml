@@ -1,0 +1,7 @@
+## Append samples of your project ##
+resources:
+- modeldock_v1alpha1_modelrepository.yaml
+- modeldock_v1alpha1_modelartifact.yaml
+- modeldock_v1alpha1_modelexport.yaml
+- modeldock_v1alpha1_modelcache.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples

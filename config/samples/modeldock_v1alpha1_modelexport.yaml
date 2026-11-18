@@ -1,0 +1,9 @@
+apiVersion: modeldock.wutz.dev/v1alpha1
+kind: ModelExport
+metadata:
+  labels:
+    app.kubernetes.io/name: modeldock
+    app.kubernetes.io/managed-by: kustomize
+  name: modelexport-sample
+spec:
+  # TODO(user): Add fields here
